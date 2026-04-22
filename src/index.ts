@@ -93,6 +93,14 @@ async function main() {
         console.error(err.stack);
       });
       
+      res.on("finish", () => {
+        console.error(`[Response] finish event - status ${res.statusCode}, writable: ${res.writable}`);
+      });
+      
+      res.on("close", () => {
+        console.error(`[Response] close event`);
+      });
+      
       try {
         console.error("Calling transport.handleRequest()...");
         console.error(`Request headers:`, req.headers);
@@ -107,6 +115,7 @@ async function main() {
         console.error(`Response headers sent: ${res.headersSent}`);
         console.error(`Response writable: ${res.writable}`);
         console.error(`Response finished: ${res.writableEnded}`);
+        console.error(`Response getHeaders():`, res.getHeaders());
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
