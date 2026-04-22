@@ -461,6 +461,58 @@ Returns:
       }
     },
   );
+
+  // ---- vault_canvas_read --------------------------------------------------
+  server.registerTool(
+    "vault_canvas_read",
+    {
+      title: "Read an Obsidian Canvas",
+      description: "Reads and parses an Obsidian .canvas file (JSON).",
+      inputSchema: {
+        path: VaultPath,
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ path: rel }) => {
+      try {
+        if (!rel.endsWith('.canvas')) return fail(new Error("Path must end with .canvas"));
+        const text = await readText(cfg.VAULT_ROOT, rel);
+        const canvas = JSON.parse(text);
+        return ok({ path: rel, canvas });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  // ---- vault_canvas_write -------------------------------------------------
+  server.registerTool(
+    "vault_canvas_write",
+    {
+      title: "Write an Obsidian Canvas",
+      description: "Writes a valid Obsidian .canvas JSON structure to a file.",
+      inputSchema: {
+        path: VaultPath,
+        canvas: z.object({
+          nodes: z.array(z.any()),
+          edges: z.array(z.any())
+        }).passthrough(),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ path: rel, canvas }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        if (!rel.endsWith('.canvas')) return fail(new Error("Path must end with .canvas"));
+        const content = JSON.stringify(canvas, null, 2);
+        const res = await writeTextAtomic(cfg.VAULT_ROOT, rel, content, { createParents: true });
+        const commit = await maybeAutocommit(cfg, `vault_canvas_write: ${rel}`);
+        return ok({ path: res.relPath, bytes: res.bytes, ...commit });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
 }
 
 // Re-export helpers so wiki tools can reuse them.
