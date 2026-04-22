@@ -34,9 +34,9 @@ async function main() {
     // This is better for HTTP clients connecting over the internet
     // Stateful mode would require the client to track session IDs
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
+      sessionIdGenerator: () => require('crypto').randomUUID(),
     });
-    console.error("Transport created (stateless mode)");
+    console.error("Transport created (stateful mode)");
     
     // Connect the server to the transport immediately
     await server.connect(transport);
