@@ -30,9 +30,12 @@ async function main() {
     // Connect the server to the transport immediately
     await server.connect(transport);
 
+    // Auth middleware
+    const auth = buildAuthMiddleware(config);
+
     // MCP endpoint handler
     // NOTE: We do NOT use express.json() here because the SDK needs the raw stream
-    app.all("/mcp", async (req, res) => {
+    app.all("/mcp", auth, async (req, res) => {
       console.error(`MCP request received: ${req.method}`);
       try {
         await transport.handleRequest(req, res);
@@ -41,10 +44,6 @@ async function main() {
         res.status(500).send("Internal Server Error");
       }
     });
-
-    // Auth middleware for other potential endpoints
-    const auth = buildAuthMiddleware(config);
-    // app.use(auth); // Apply selectively if needed
 
     const port = config.PORT;
     const host = config.HOST;
