@@ -13,8 +13,9 @@ import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontma
 import { searchText } from "../vault/search.js";
 import { scanWikiPages } from "../vault/links.js";
 import { gitCommitAll } from "../vault/git.js";
+import { generateEmbedding, loadIndex, saveIndex, searchIndex } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
-import { CHARACTER_LIMIT } from "../constants.js";
+import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
 
 /** Shared helper: format a tool response with both text and structured content. */
@@ -512,6 +513,76 @@ Returns:
         return fail(err);
       }
     },
+  );
+
+  // ---- vault_rag_index ----------------------------------------------------
+  server.registerTool(
+    "vault_rag_index",
+    {
+      title: "Index vault for semantic search",
+      description: "Reads all markdown files and indexes them using OpenAI embeddings (requires OPENAI_API_KEY).",
+      inputSchema: {},
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => {
+      if (!cfg.OPENAI_API_KEY) return fail(new Error("OPENAI_API_KEY is not set in config."));
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        const root = cfg.VAULT_ROOT;
+        const entries = await listDir(root, WIKI_DIR, { depth: 10, includeDirs: false });
+        const index = await loadIndex(root);
+        
+        let indexed = 0;
+        for (const entry of entries) {
+          if (!entry.path.endsWith('.md')) continue;
+          try {
+            const text = await readText(root, entry.path);
+            if (text.length > 20000) continue; 
+            
+            const existing = index.chunks.find(c => c.path === entry.path && c.text === text);
+            if (existing) continue;
+
+            index.chunks = index.chunks.filter(c => c.path !== entry.path);
+
+            const embedding = await generateEmbedding(text, cfg.OPENAI_API_KEY);
+            index.chunks.push({ path: entry.path, text, embedding });
+            indexed++;
+          } catch {
+             // skip unreadable
+          }
+        }
+        
+        await saveIndex(root, index);
+        return ok({ status: "success", indexed, totalChunks: index.chunks.length });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- vault_rag_search ---------------------------------------------------
+  server.registerTool(
+    "vault_rag_search",
+    {
+      title: "Semantic search (RAG)",
+      description: "Search the vault using OpenAI embeddings (requires OPENAI_API_KEY).",
+      inputSchema: {
+        query: z.string().min(1),
+        limit: z.number().int().min(1).max(20).default(5),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ query, limit }) => {
+      if (!cfg.OPENAI_API_KEY) return fail(new Error("OPENAI_API_KEY is not set."));
+      try {
+        const queryEmbedding = await generateEmbedding(query, cfg.OPENAI_API_KEY);
+        const index = await loadIndex(cfg.VAULT_ROOT);
+        const results = await searchIndex(index, queryEmbedding, limit);
+        return ok({ count: results.length, results: results.map(r => ({ path: r.path, score: r.score })) });
+      } catch (err) {
+        return fail(err);
+      }
+    }
   );
 }
 

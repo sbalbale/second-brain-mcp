@@ -21,6 +21,7 @@ const ConfigSchema = z.object({
   VAULT_AUTOCOMMIT: boolFromEnv.default("true"),
   DEFAULT_RESPONSE_FORMAT: z.enum(["markdown", "json"]).default("markdown"),
   READ_ONLY: boolFromEnv.default("false"),
+  OPENAI_API_KEY: z.string().optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
