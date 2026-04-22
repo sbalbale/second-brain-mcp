@@ -61,6 +61,26 @@ async function main() {
         console.error(`Request body: ${bodyStr}`);
       }
       
+      // Intercept status calls to see what's happening
+      const originalStatus = res.status.bind(res);
+      res.status = function(code: number) {
+        console.error(`[Response] status(${code}) called`);
+        return originalStatus(code);
+      } as any;
+      
+      // Intercept write to see if data is being sent
+      const originalWrite = res.write.bind(res);
+      res.write = function(chunk: any, ...args: any[]) {
+        if (typeof chunk === 'string') {
+          console.error(`[Response] write() called with string: ${chunk.substring(0, 100)}`);
+        } else if (Buffer.isBuffer(chunk)) {
+          console.error(`[Response] write() called with ${chunk.length} bytes`);
+        } else {
+          console.error(`[Response] write() called with object`);
+        }
+        return originalWrite(chunk, ...args);
+      } as any;
+      
       res.on("error", (err) => {
         console.error(`Response ERROR event: ${err.message}`);
         console.error(err.stack);
@@ -73,6 +93,7 @@ async function main() {
         const duration = Date.now() - startTime;
         console.error(`✓ transport.handleRequest() completed in ${duration}ms`);
         console.error(`Response status code: ${res.statusCode}`);
+        console.error(`Response headers sent: ${res.headersSent}`);
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
