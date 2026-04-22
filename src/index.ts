@@ -66,9 +66,11 @@ async function main() {
 
     // Use stateful mode with session management
     // Each client gets a session ID to maintain request/response correlation
+    // Note: enableJsonResponse is disabled in stateful mode - the SDK handles session
+    // management via Mcp-Session-Id header and requires proper SSE/streaming for stateful clients
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => crypto.randomUUID(),
-      enableJsonResponse: true,
+      enableJsonResponse: false,
     });
 
     // Connect the server to the transport once at startup
