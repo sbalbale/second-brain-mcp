@@ -18,8 +18,8 @@ async function main() {
 
     const app = express();
 
-    // Disable default body parsing - MCP transport needs raw stream access
-    app.set("x-powered-by", false);
+    // Parse incoming request body for transport
+    app.use(express.json({ limit: "100mb" }));
 
     // Health check (unauthenticated) - Move ABOVE any other middleware
     app.get("/health", (req, res) => {
@@ -46,7 +46,6 @@ async function main() {
     const auth = buildAuthMiddleware(config);
 
     // MCP endpoint handler
-    // NOTE: We do NOT use express.json() here because the SDK needs the raw stream
     app.all("/mcp", auth, async (req, res) => {
       const startTime = Date.now();
       console.error(`\n=== MCP Request Start ===`);
@@ -56,46 +55,24 @@ async function main() {
       console.error(`Content-Type: ${req.get("content-type")}`);
       console.error(`Accept: ${req.get("accept")}`);
       console.error(`Auth: ${JSON.stringify((req as any).auth)}`);
+      console.error(`Request body type: ${typeof (req as any).body}`);
+      if ((req as any).body) {
+        const bodyStr = JSON.stringify((req as any).body).substring(0, 200);
+        console.error(`Request body: ${bodyStr}`);
+      }
       
-      // Capture response data
-      let responseData = "";
-      const originalWrite = res.write.bind(res);
-      const originalEnd = res.end.bind(res);
-      
-      res.write = function(chunk: any, ...args: any[]) {
-        if (typeof chunk === "string") {
-          responseData += chunk;
-        } else if (Buffer.isBuffer(chunk)) {
-          responseData += chunk.toString("utf8");
-        }
-        return originalWrite(chunk, ...args);
-      };
-      
-      res.end = function(...args: any[]) {
-        const duration = Date.now() - startTime;
-        console.error(`Response Status: ${res.statusCode}`);
-        console.error(`Response Headers: ${JSON.stringify(res.getHeaders())}`);
-        console.error(`Response Size: ${responseData.length} bytes`);
-        if (responseData.length < 500) {
-          console.error(`Response Body: ${responseData}`);
-        } else {
-          console.error(`Response Body: ${responseData.substring(0, 500)}... (truncated)`);
-        }
-        console.error(`Request completed in ${duration}ms`);
-        console.error(`=== MCP Request End ===\n`);
-        return originalEnd(...args);
-      };
-      
-      // Catch any errors from the response object itself
       res.on("error", (err) => {
-        console.error(`Response error event: ${err.message}`);
+        console.error(`Response ERROR event: ${err.message}`);
         console.error(err.stack);
       });
       
       try {
         console.error("Calling transport.handleRequest()...");
-        await transport.handleRequest(req, res);
-        console.error(`transport.handleRequest() completed`);
+        // Pass parsed body to transport
+        await transport.handleRequest(req, res, (req as any).body);
+        const duration = Date.now() - startTime;
+        console.error(`✓ transport.handleRequest() completed in ${duration}ms`);
+        console.error(`Response status code: ${res.statusCode}`);
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
@@ -124,6 +101,7 @@ async function main() {
           }
         }
       }
+      console.error(`=== MCP Request End ===\n`);
     });
 
     const port = config.PORT;
