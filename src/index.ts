@@ -56,22 +56,23 @@ async function main() {
     const server = createServer(config);
     console.error("Server created");
 
+    // Create a single transport instance for HTTP mode
+    // Note: We use enableJsonResponse: true to get JSON responses instead of SSE,
+    // which works better with stateless clients like VS Code's MCP extension
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+      enableJsonResponse: true,
+    });
+
+    // Connect the server to the transport once at startup
+    await server.connect(transport);
+    console.error("Server connected to transport");
+
     // Auth middleware
     const auth = buildAuthMiddleware(config);
 
     // MCP endpoint handler
-    // IMPORTANT: In stateless mode, each request must use a fresh transport instance.
-    // Reusing a stateless transport causes message ID collisions and errors.
     app.all("/mcp", auth, async (req, res, next) => {
-      // Create a fresh transport for this request (stateless mode)
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: undefined,
-        enableJsonResponse: true,
-      });
-      
-      // Connect the server to this request-specific transport
-      await server.connect(transport);
-      
       try {
         // Pass parsed body to transport - only pass body for requests that have content
         const bodyToPass = req.method === 'GET' ? undefined : (req as any).body;
