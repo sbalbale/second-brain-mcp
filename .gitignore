@@ -7,9 +7,9 @@ dist/
 Thumbs.db
 
 # Local test vaults
-vault/
-vaults/
-test-vault/
+/vault/
+/vaults/
+/test-vault/
 
 # Cloudflare local tunnel creds (rotate if leaked)
 .cloudflared/*.json
