@@ -57,12 +57,38 @@ async function main() {
       console.error(`Accept: ${req.get("accept")}`);
       console.error(`Auth: ${JSON.stringify((req as any).auth)}`);
       
+      // Capture response data
+      let responseData = "";
+      const originalWrite = res.write.bind(res);
+      const originalEnd = res.end.bind(res);
+      
+      res.write = function(chunk: any, ...args: any[]) {
+        if (typeof chunk === "string") {
+          responseData += chunk;
+        } else if (Buffer.isBuffer(chunk)) {
+          responseData += chunk.toString("utf8");
+        }
+        return originalWrite(chunk, ...args);
+      };
+      
+      res.end = function(...args: any[]) {
+        const duration = Date.now() - startTime;
+        console.error(`Response Status: ${res.statusCode}`);
+        console.error(`Response Headers: ${JSON.stringify(res.getHeaders())}`);
+        console.error(`Response Size: ${responseData.length} bytes`);
+        if (responseData.length < 500) {
+          console.error(`Response Body: ${responseData}`);
+        } else {
+          console.error(`Response Body: ${responseData.substring(0, 500)}... (truncated)`);
+        }
+        console.error(`Request completed in ${duration}ms`);
+        console.error(`=== MCP Request End ===\n`);
+        return originalEnd(...args);
+      };
+      
       try {
         console.error("Calling transport.handleRequest()...");
         await transport.handleRequest(req, res);
-        const duration = Date.now() - startTime;
-        console.error(`✓ Request completed successfully in ${duration}ms`);
-        console.error(`=== MCP Request End ===\n`);
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
