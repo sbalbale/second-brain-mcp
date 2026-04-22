@@ -330,24 +330,40 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
     "wiki_attach_url",
     {
       title: "Attach a URL as a raw source",
-      description: "Fetches a URL's content and saves it into the raw/ directory.",
+      description: "Fetches a URL's content, converts it to Markdown, and saves it into the raw/ directory.",
       inputSchema: {
         url: z.string().url().describe("The URL to fetch."),
-        filename: z.string().optional().describe("Optional filename to save as."),
+        filename: z.string().optional().describe("Optional filename to save as. Defaults to a slugified title or URL with a timestamp."),
       },
     },
     async ({ url, filename }) => {
       try {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to fetch URL: ${res.statusText}`);
-        const body = await res.text();
+        const html = await res.text();
+
+        const dom = new JSDOM(html);
+        const title = dom.window.document.title || url.replace(/^https?:\/\//, '').split('/')[0] || "Untitled";
+        
+        const turndownService = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+        const markdownBody = turndownService.turndown(dom.window.document.body ? dom.window.document.body.innerHTML : html);
 
         const root = cfg.VAULT_ROOT;
-        const name = filename ?? `url-${Date.now()}.html`;
+        const ts = new Date().toISOString().replace(/[:.]/g, "-");
+        
+        // create a safe slug for the filename if not provided
+        const safeTitle = title.replace(/[^a-z0-9]/gi, '-').toLowerCase().replace(/-+/g, '-').replace(/^-|-$/g, '').substring(0, 50);
+        const name = filename ?? `${safeTitle || 'url'}-${ts}.md`;
         const relPath = path.join(RAW_DIR, name);
 
-        await writeTextAtomic(root, relPath, body, { createParents: true });
-        return ok({ status: "success", path: relPath, bytes: body.length });
+        // Include frontmatter with the source URL
+        const content = buildMarkdown(
+          { type: "source", source: url, title, captured: new Date().toISOString() },
+          markdownBody
+        );
+
+        await writeTextAtomic(root, relPath, content, { createParents: true });
+        return ok({ status: "success", path: relPath, bytes: content.length, title });
       } catch (err) {
         return fail(err);
       }
