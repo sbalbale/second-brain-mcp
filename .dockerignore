@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.github
+.env
+.env.local
+*.log
+vault
+vaults
+test-vault
+.cloudflared
+docs
+tests

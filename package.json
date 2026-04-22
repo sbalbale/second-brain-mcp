@@ -1,0 +1,36 @@
+{
+  "name": "second-brain-mcp-server",
+  "version": "0.1.0",
+  "description": "Remote MCP server for a personal LLM-Wiki second brain (Obsidian vault) over Cloudflare Tunnel.",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "second-brain-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx tests/smoke.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.1",
+    "express": "^4.21.2",
+    "gray-matter": "^4.0.3",
+    "jose": "^5.9.6",
+    "yaml": "^2.6.1",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

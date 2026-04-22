@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.DS_Store
+Thumbs.db
+
+# Local test vaults
+vault/
+vaults/
+test-vault/
+
+# Cloudflare local tunnel creds (rotate if leaked)
+.cloudflared/*.json
+.cloudflared/*.pem

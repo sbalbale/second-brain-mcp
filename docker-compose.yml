@@ -1,0 +1,50 @@
+# docker-compose.yml
+#
+# Runs the MCP server + a cloudflared sidecar so the server is reachable at
+# your public Cloudflare Tunnel hostname without opening any inbound ports.
+#
+# Required env (in .env next to this file):
+#   VAULT_PATH=/absolute/host/path/to/your/vault
+#   AUTH_TOKEN=<generated secret>
+#   CF_TUNNEL_TOKEN=<token copied from Cloudflare Zero Trust dashboard>
+#   CF_ACCESS_TEAM_DOMAIN=<your-team>.cloudflareaccess.com  (optional but recommended)
+#   CF_ACCESS_AUD=<application audience tag from CF Access>  (optional but recommended)
+
+services:
+  mcp:
+    build: .
+    image: second-brain-mcp:latest
+    restart: unless-stopped
+    environment:
+      VAULT_ROOT: /vault
+      TRANSPORT: http
+      HOST: 0.0.0.0
+      PORT: 8787
+      AUTH_TOKEN: ${AUTH_TOKEN}
+      CF_ACCESS_TEAM_DOMAIN: ${CF_ACCESS_TEAM_DOMAIN:-}
+      CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
+      VAULT_AUTOCOMMIT: ${VAULT_AUTOCOMMIT:-true}
+      DEFAULT_RESPONSE_FORMAT: ${DEFAULT_RESPONSE_FORMAT:-markdown}
+    volumes:
+      - ${VAULT_PATH}:/vault
+    # Do NOT publish ports to the host. cloudflared reaches us over the
+    # internal docker network.
+    expose:
+      - "8787"
+    networks:
+      - mcpnet
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN}
+    depends_on:
+      - mcp
+    networks:
+      - mcpnet
+
+networks:
+  mcpnet:
+    driver: bridge

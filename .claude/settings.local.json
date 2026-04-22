@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C \"C:\\\\Users\\\\seanb\\\\Documents\\\\second-brain-mcp\" status)",
+      "WebFetch(domain:github.com)",
+      "WebSearch"
+    ]
+  }
+}
