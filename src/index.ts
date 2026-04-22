@@ -64,11 +64,10 @@ async function main() {
     const server = createServer(config);
     console.error("Server created");
 
-    // Create a single transport instance for HTTP mode
-    // Note: We use enableJsonResponse: true to get JSON responses instead of SSE,
-    // which works better with stateless clients like VS Code's MCP extension
+    // Use stateful mode with session management
+    // Each client gets a session ID to maintain request/response correlation
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
+      sessionIdGenerator: () => crypto.randomUUID(),
       enableJsonResponse: true,
     });
 
