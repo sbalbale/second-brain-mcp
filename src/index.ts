@@ -31,12 +31,11 @@ async function main() {
     console.error("Server created");
     
     // Use stateless mode: no session ID required
-    // This is better for HTTP clients connecting over the internet
-    // Stateful mode would require the client to track session IDs
+    // VS Code MCP client is stateless and doesn't track session IDs
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => require('crypto').randomUUID(),
+      sessionIdGenerator: undefined,
     });
-    console.error("Transport created (stateful mode)");
+    console.error("Transport created (stateless mode)");
     
     // Connect the server to the transport immediately
     await server.connect(transport);
@@ -107,8 +106,17 @@ async function main() {
         console.error(`Request method: ${req.method}`);
         console.error(`Response writable: ${res.writable}`);
         
+        // Wrap with a timeout to detect hung requests
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error("Transport.handleRequest timeout")), 5000)
+        );
+        
         // Pass parsed body to transport
-        await transport.handleRequest(req, res, (req as any).body);
+        await Promise.race([
+          transport.handleRequest(req, res, (req as any).body),
+          timeoutPromise
+        ]);
+        
         const duration = Date.now() - startTime;
         console.error(`✓ transport.handleRequest() completed in ${duration}ms`);
         console.error(`Response status code: ${res.statusCode}`);
