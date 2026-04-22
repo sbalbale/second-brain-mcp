@@ -17,34 +17,41 @@ async function main() {
     assertAuthConfigured(config);
 
     const app = express();
-    app.use(express.json());
 
-    // Health check (unauthenticated)
+    // Health check (unauthenticated) - Move ABOVE any other middleware
     app.get("/health", (req, res) => {
+      console.error("Health check request received");
       res.json({ status: "ok", vault: config.VAULT_ROOT });
     });
 
-    // Auth middleware for MCP endpoints
-    const auth = buildAuthMiddleware(config);
-    app.use("/mcp", auth);
-
     const server = createServer(config);
-    
-    // StreamableHTTPServerTransport is stateless or stateful. 
-    // For many clients, stateless is easier behind a load balancer, but
-    // stateful (default) is better for SSE.
     const transport = new StreamableHTTPServerTransport();
+    
+    // Connect the server to the transport immediately
     await server.connect(transport);
 
+    // MCP endpoint handler
+    // NOTE: We do NOT use express.json() here because the SDK needs the raw stream
     app.all("/mcp", async (req, res) => {
-      await transport.handleRequest(req, res);
+      console.error(`MCP request received: ${req.method}`);
+      try {
+        await transport.handleRequest(req, res);
+      } catch (err) {
+        console.error("Error handling MCP request:", err);
+        res.status(500).send("Internal Server Error");
+      }
     });
+
+    // Auth middleware for other potential endpoints
+    const auth = buildAuthMiddleware(config);
+    // app.use(auth); // Apply selectively if needed
 
     const port = config.PORT;
     const host = config.HOST;
     app.listen(port, host, () => {
-      console.error(`Second Brain MCP (http) listening on ${host}:${port}/mcp`);
-      console.error(`Vault: ${config.VAULT_ROOT}`);
+      console.error(`Second Brain MCP (http) listening on ${host}:${port}`);
+      console.error(`MCP endpoint: http://${host}:${port}/mcp`);
+      console.error(`Health check: http://${host}:${port}/health`);
     });
   }
 }
