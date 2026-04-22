@@ -48,26 +48,44 @@ async function main() {
     // MCP endpoint handler
     // NOTE: We do NOT use express.json() here because the SDK needs the raw stream
     app.all("/mcp", auth, async (req, res) => {
-      console.error(`MCP request received: ${req.method} ${req.url}`);
+      const startTime = Date.now();
+      console.error(`\n=== MCP Request Start ===`);
+      console.error(`Time: ${new Date().toISOString()}`);
+      console.error(`Method: ${req.method}`);
+      console.error(`URL: ${req.url}`);
       console.error(`Content-Type: ${req.get("content-type")}`);
+      console.error(`Accept: ${req.get("accept")}`);
       console.error(`Auth: ${JSON.stringify((req as any).auth)}`);
+      
       try {
-        console.error("About to call transport.handleRequest...");
+        console.error("Calling transport.handleRequest()...");
         await transport.handleRequest(req, res);
-        console.error("transport.handleRequest returned successfully");
+        const duration = Date.now() - startTime;
+        console.error(`✓ Request completed successfully in ${duration}ms`);
+        console.error(`=== MCP Request End ===\n`);
       } catch (err) {
+        const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
         const errorStack = err instanceof Error ? err.stack : "";
-        console.error("CAUGHT ERROR in MCP handler:", errorMessage);
+        console.error(`✗ ERROR after ${duration}ms: ${errorMessage}`);
         if (errorStack) {
-          console.error("Stack trace:", errorStack);
+          console.error(`Stack trace:\n${errorStack}`);
         }
+        console.error(`=== MCP Request End (with error) ===\n`);
+        
         if (!res.headersSent) {
           try {
             res.status(500).json({ 
-              error: "Internal Server Error", 
-              detail: errorMessage,
-              stack: process.env.NODE_ENV === "development" ? errorStack : undefined 
+              jsonrpc: "2.0",
+              error: {
+                code: -32000,
+                message: "Internal Server Error",
+                data: {
+                  detail: errorMessage,
+                  stack: process.env.NODE_ENV === "development" ? errorStack : undefined 
+                }
+              },
+              id: null
             });
           } catch (e) {
             console.error("Failed to send error response:", e);
