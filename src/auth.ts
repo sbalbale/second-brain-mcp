@@ -2,6 +2,14 @@ import type { Request, Response, NextFunction } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import type { Config } from "./config.js";
 
+export interface AuthInfo {
+  token?: string;
+  cloudflareAccess?: {
+    audience: string;
+    issuer: string;
+  };
+}
+
 /**
  * Build Express middleware that enforces:
  *   1. A static bearer token (Authorization: Bearer <AUTH_TOKEN>), if set.
@@ -18,7 +26,9 @@ export function buildAuthMiddleware(config: Config) {
       )
     : null;
 
-  return async function authMiddleware(req: Request, res: Response, next: NextFunction) {
+  return async function authMiddleware(req: Request & { auth?: AuthInfo }, res: Response, next: NextFunction) {
+    const authInfo: AuthInfo = {};
+
     // Bearer token (required when configured).
     if (config.AUTH_TOKEN) {
       const hdr = req.header("authorization") ?? "";
@@ -27,6 +37,7 @@ export function buildAuthMiddleware(config: Config) {
         res.status(401).json({ error: "invalid or missing bearer token" });
         return;
       }
+      authInfo.token = match[1];
     }
 
     // Cloudflare Access JWT (required when CF_ACCESS_AUD is set).
@@ -41,6 +52,10 @@ export function buildAuthMiddleware(config: Config) {
           audience: config.CF_ACCESS_AUD,
           issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
         });
+        authInfo.cloudflareAccess = {
+          audience: config.CF_ACCESS_AUD,
+          issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
+        };
       } catch (err) {
         res.status(401).json({
           error: "Cloudflare Access JWT verification failed",
@@ -50,6 +65,8 @@ export function buildAuthMiddleware(config: Config) {
       }
     }
 
+    // Attach auth info to request for MCP transport to use
+    req.auth = authInfo;
     next();
   };
 }

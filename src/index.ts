@@ -40,8 +40,13 @@ async function main() {
       try {
         await transport.handleRequest(req, res);
       } catch (err) {
-        console.error("Error handling MCP request:", err);
-        res.status(500).send("Internal Server Error");
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const errorStack = err instanceof Error ? err.stack : "";
+        console.error("Error handling MCP request:", errorMessage);
+        console.error("Stack:", errorStack);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Internal Server Error", detail: errorMessage });
+        }
       }
     });
 
