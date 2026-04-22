@@ -18,6 +18,32 @@ async function main() {
 
     const app = express();
 
+    // Normalize Accept header BEFORE any other processing
+    // The MCP SDK requires both "application/json" and "text/event-stream"
+    // We must modify both headers and rawHeaders since the HTTP transport layer may read from either
+    app.use((req, res, next) => {
+      const accept = req.get("accept");
+      if (!accept || accept === "*/*") {
+        const newAccept = "application/json, text/event-stream";
+        req.headers.accept = newAccept;
+        
+        // Also modify rawHeaders which Node.js uses internally
+        const rawHeaders = req.rawHeaders || [];
+        const acceptIndex = rawHeaders.findIndex(h => h && h.toLowerCase() === "accept");
+        if (acceptIndex >= 0) {
+          rawHeaders[acceptIndex + 1] = newAccept;
+        } else {
+          rawHeaders.push("Accept", newAccept);
+        }
+        (req as any).rawHeaders = rawHeaders;
+        
+        if (!req.url?.startsWith("/health")) {
+          console.error(`[Middleware] Normalized Accept header from "${accept}" to "${newAccept}"`);
+        }
+      }
+      next();
+    });
+
     // Parse incoming request body for transport
     app.use(express.json({ limit: "100mb" }));
 
@@ -29,130 +55,42 @@ async function main() {
 
     const server = createServer(config);
     console.error("Server created");
-    
-    // Use stateless mode: no session ID required
-    // VS Code MCP client is stateless and doesn't track session IDs
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    console.error("Transport created (stateless mode)");
-    
-    // Connect the server to the transport immediately
-    await server.connect(transport);
-    console.error("Server connected to transport");
 
     // Auth middleware
     const auth = buildAuthMiddleware(config);
 
     // MCP endpoint handler
-    app.all("/mcp", auth, async (req, res) => {
-      const startTime = Date.now();
-      console.error(`\n=== MCP Request Start ===`);
-      console.error(`Time: ${new Date().toISOString()}`);
-      console.error(`Method: ${req.method}`);
-      console.error(`URL: ${req.url}`);
-      console.error(`Content-Type: ${req.get("content-type")}`);
-      console.error(`Accept: ${req.get("accept")}`);
-      console.error(`Auth: ${JSON.stringify((req as any).auth)}`);
-      console.error(`Request body type: ${typeof (req as any).body}`);
-      if ((req as any).body) {
-        const bodyStr = JSON.stringify((req as any).body).substring(0, 200);
-        console.error(`Request body: ${bodyStr}`);
-      }
-      
-      // Intercept status calls to see what's happening
-      const originalStatus = res.status.bind(res);
-      res.status = function(code: number) {
-        console.error(`[Response] status(${code}) called`);
-        return originalStatus(code);
-      } as any;
-      
-      // Intercept write to see if data is being sent
-      const originalWrite = res.write.bind(res);
-      res.write = function(chunk: any, ...args: any[]) {
-        if (typeof chunk === 'string') {
-          console.error(`[Response] write() called with string: ${chunk.substring(0, 100)}`);
-        } else if (Buffer.isBuffer(chunk)) {
-          console.error(`[Response] write() called with ${chunk.length} bytes`);
-        } else {
-          console.error(`[Response] write() called with object`);
-        }
-        return originalWrite(chunk, ...args);
-      } as any;
-      
-      // Also intercept setHeader to see headers being set
-      const originalSetHeader = res.setHeader.bind(res);
-      res.setHeader = function(name: string, value: any) {
-        console.error(`[Response] setHeader("${name}", ${JSON.stringify(value).substring(0, 50)})`);
-        return originalSetHeader(name, value);
-      } as any;
-      
-      res.on("error", (err) => {
-        console.error(`Response ERROR event: ${err.message}`);
-        console.error(err.stack);
+    // IMPORTANT: In stateless mode, each request must use a fresh transport instance.
+    // Reusing a stateless transport causes message ID collisions and errors.
+    app.all("/mcp", auth, async (req, res, next) => {
+      // Create a fresh transport for this request (stateless mode)
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+        enableJsonResponse: true,
       });
       
-      res.on("finish", () => {
-        console.error(`[Response] finish event - status ${res.statusCode}, writable: ${res.writable}`);
-      });
-      
-      res.on("close", () => {
-        console.error(`[Response] close event`);
-      });
+      // Connect the server to this request-specific transport
+      await server.connect(transport);
       
       try {
-        console.error("Calling transport.handleRequest()...");
-        console.error(`Request headers:`, req.headers);
-        console.error(`Request method: ${req.method}`);
-        console.error(`Response writable: ${res.writable}`);
-        
-        // Wrap with a timeout to detect hung requests
-        const timeoutPromise = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error("Transport.handleRequest timeout")), 5000)
-        );
-        
-        // Pass parsed body to transport
-        await Promise.race([
-          transport.handleRequest(req, res, (req as any).body),
-          timeoutPromise
-        ]);
-        
-        const duration = Date.now() - startTime;
-        console.error(`✓ transport.handleRequest() completed in ${duration}ms`);
-        console.error(`Response status code: ${res.statusCode}`);
-        console.error(`Response headers sent: ${res.headersSent}`);
-        console.error(`Response writable: ${res.writable}`);
-        console.error(`Response finished: ${res.writableEnded}`);
-        console.error(`Response getHeaders():`, res.getHeaders());
+        // Pass parsed body to transport - only pass body for requests that have content
+        const bodyToPass = req.method === 'GET' ? undefined : (req as any).body;
+        await transport.handleRequest(req, res, bodyToPass);
       } catch (err) {
-        const duration = Date.now() - startTime;
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        const errorStack = err instanceof Error ? err.stack : "";
-        console.error(`✗ EXCEPTION in transport.handleRequest() after ${duration}ms: ${errorMessage}`);
-        if (errorStack) {
-          console.error(`Stack trace:\n${errorStack}`);
-        }
-        
+        // If transport throws an error, send error response if headers haven't been sent
         if (!res.headersSent) {
-          try {
-            res.status(500).json({ 
-              jsonrpc: "2.0",
-              error: {
-                code: -32000,
-                message: "Internal Server Error",
-                data: {
-                  detail: errorMessage,
-                  stack: process.env.NODE_ENV === "development" ? errorStack : undefined 
-                }
-              },
-              id: null
-            });
-          } catch (e) {
-            console.error("Failed to send error response:", e);
-          }
+          const errorMessage = err instanceof Error ? err.message : String(err);
+          res.status(500).json({ 
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: "Internal Server Error",
+              data: { detail: errorMessage }
+            },
+            id: null
+          });
         }
       }
-      console.error(`=== MCP Request End ===\n`);
     });
 
     const port = config.PORT;
