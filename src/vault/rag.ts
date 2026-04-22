@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import OpenAI from "openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export interface Chunk {
   path: string;
@@ -25,13 +25,15 @@ export function cosineSimilarity(a: number[], b: number[]) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
+/**
+ * Generates an embedding using Google's text-embedding-004 model.
+ * Free tier is available for Gemini.
+ */
 export async function generateEmbedding(text: string, apiKey: string): Promise<number[]> {
-  const openai = new OpenAI({ apiKey });
-  const response = await openai.embeddings.create({
-    model: "text-embedding-3-small",
-    input: text,
-  });
-  return response.data[0]!.embedding;
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
+  const result = await model.embedContent(text);
+  return result.embedding.values;
 }
 
 export async function loadIndex(vaultRoot: string): Promise<Index> {

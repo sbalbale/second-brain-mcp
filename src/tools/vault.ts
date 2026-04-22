@@ -520,12 +520,13 @@ Returns:
     "vault_rag_index",
     {
       title: "Index vault for semantic search",
-      description: "Reads all markdown files and indexes them using OpenAI embeddings (requires OPENAI_API_KEY).",
+      description: "Reads all markdown files and indexes them using embeddings (prefers GEMINI_API_KEY, falls back to OPENAI_API_KEY).",
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => {
-      if (!cfg.OPENAI_API_KEY) return fail(new Error("OPENAI_API_KEY is not set in config."));
+      const apiKey = cfg.GEMINI_API_KEY || cfg.OPENAI_API_KEY;
+      if (!apiKey) return fail(new Error("Neither GEMINI_API_KEY nor OPENAI_API_KEY is set in config."));
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -544,7 +545,7 @@ Returns:
 
             index.chunks = index.chunks.filter(c => c.path !== entry.path);
 
-            const embedding = await generateEmbedding(text, cfg.OPENAI_API_KEY);
+            const embedding = await generateEmbedding(text, apiKey);
             index.chunks.push({ path: entry.path, text, embedding });
             indexed++;
           } catch {
@@ -553,7 +554,7 @@ Returns:
         }
         
         await saveIndex(root, index);
-        return ok({ status: "success", indexed, totalChunks: index.chunks.length });
+        return ok({ status: "success", indexed, totalChunks: index.chunks.length, provider: cfg.GEMINI_API_KEY ? "gemini" : "openai" });
       } catch (err) {
         return fail(err);
       }
@@ -565,7 +566,7 @@ Returns:
     "vault_rag_search",
     {
       title: "Semantic search (RAG)",
-      description: "Search the vault using OpenAI embeddings (requires OPENAI_API_KEY).",
+      description: "Search the vault using semantic embeddings (prefers GEMINI_API_KEY).",
       inputSchema: {
         query: z.string().min(1),
         limit: z.number().int().min(1).max(20).default(5),
@@ -573,12 +574,13 @@ Returns:
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ query, limit }) => {
-      if (!cfg.OPENAI_API_KEY) return fail(new Error("OPENAI_API_KEY is not set."));
+      const apiKey = cfg.GEMINI_API_KEY || cfg.OPENAI_API_KEY;
+      if (!apiKey) return fail(new Error("No API key configured for embeddings."));
       try {
-        const queryEmbedding = await generateEmbedding(query, cfg.OPENAI_API_KEY);
+        const queryEmbedding = await generateEmbedding(query, apiKey);
         const index = await loadIndex(cfg.VAULT_ROOT);
         const results = await searchIndex(index, queryEmbedding, limit);
-        return ok({ count: results.length, results: results.map(r => ({ path: r.path, score: r.score })) });
+        return ok({ count: results.length, results: results.map(r => ({ path: r.path, score: r.score })), provider: cfg.GEMINI_API_KEY ? "gemini" : "openai" });
       } catch (err) {
         return fail(err);
       }

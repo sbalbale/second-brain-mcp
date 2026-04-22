@@ -3,6 +3,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Config } from "../config.js";
 import fs from "node:fs/promises";
 import path from "node:path";
+import TurndownService from "turndown";
+import { JSDOM } from "jsdom";
 import {
   RAW_DIR,
   WIKI_DIR,

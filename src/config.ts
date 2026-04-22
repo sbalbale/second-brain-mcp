@@ -22,6 +22,7 @@ const ConfigSchema = z.object({
   DEFAULT_RESPONSE_FORMAT: z.enum(["markdown", "json"]).default("markdown"),
   READ_ONLY: boolFromEnv.default("false"),
   OPENAI_API_KEY: z.string().optional(),
+  GEMINI_API_KEY: z.string().optional(),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
