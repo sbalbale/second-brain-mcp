@@ -1,0 +1,19 @@
+name: KeySentinel
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Vishrut19/KeySentinel@v0.1.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
