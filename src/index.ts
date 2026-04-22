@@ -18,6 +18,14 @@ async function main() {
 
     const app = express();
 
+    // Log all incoming requests
+    app.use((req, res, next) => {
+      console.error(`[REQUEST] ${req.method} ${req.url} from ${req.ip}`);
+      console.error(`[HEADERS] authorization=${req.get("authorization")?.substring(0, 20)}...`);
+      console.error(`[HEADERS] accept=${req.get("accept")}`);
+      next();
+    });
+
     // Normalize Accept header BEFORE any other processing
     // The MCP SDK requires both "application/json" and "text/event-stream"
     // We must modify both headers and rawHeaders since the HTTP transport layer may read from either
@@ -73,14 +81,24 @@ async function main() {
 
     // MCP endpoint handler
     app.all("/mcp", auth, async (req, res, next) => {
+      console.error(`\n[MCP] ${req.method} request received`);
+      console.error(`[MCP] Headers: accept="${req.get("accept")}"`);
+      
       try {
         // Pass parsed body to transport - only pass body for requests that have content
         const bodyToPass = req.method === 'GET' ? undefined : (req as any).body;
         await transport.handleRequest(req, res, bodyToPass);
+        console.error(`[MCP] Request handled successfully`);
       } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const errorStack = err instanceof Error ? err.stack : "";
+        console.error(`[MCP] ERROR: ${errorMessage}`);
+        if (errorStack) {
+          console.error(`[MCP] Stack: ${errorStack.split('\n').slice(0, 5).join('\n')}`);
+        }
+        
         // If transport throws an error, send error response if headers haven't been sent
         if (!res.headersSent) {
-          const errorMessage = err instanceof Error ? err.message : String(err);
           res.status(500).json({ 
             jsonrpc: "2.0",
             error: {
