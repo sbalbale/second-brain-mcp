@@ -14,7 +14,7 @@ import {
 import { listDir, writeTextAtomic, exists, readText } from "../vault/fs.js";
 import { buildMarkdown, parseMarkdown } from "../vault/frontmatter.js";
 import { scanWikiPages } from "../vault/links.js";
-import { gitStatus, gitLog } from "../vault/git.js";
+import { gitStatus, gitLog, gitPush } from "../vault/git.js";
 
 function ok(structured: unknown, text?: string) {
   const textContent = text ?? JSON.stringify(structured, null, 2);
@@ -366,6 +366,70 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
 
         await writeTextAtomic(root, relPath, content, { createParents: true });
         return ok({ status: "success", path: relPath, bytes: content.length, title });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_sync ----------------------------------------------------------
+  server.registerTool(
+    "wiki_sync",
+    {
+      title: "Sync vault to remote",
+      description: "Runs git push to sync the local vault commits to the remote repository.",
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const result = await gitPush(cfg.VAULT_ROOT);
+        if (!result.success) return fail(new Error(`Git push failed: ${result.stderr}`));
+        return ok({ status: "success", stdout: result.stdout });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_validate_frontmatter ------------------------------------------
+  server.registerTool(
+    "wiki_validate_frontmatter",
+    {
+      title: "Validate frontmatter schema",
+      description: "Checks all markdown files in a directory to ensure they have the required frontmatter fields.",
+      inputSchema: {
+        path: z.string().default("wiki"),
+        required_fields: z.array(z.string()).min(1).describe("List of required YAML keys (e.g. ['tags', 'sources'])."),
+      },
+    },
+    async ({ path: rel, required_fields }) => {
+      try {
+        const root = cfg.VAULT_ROOT;
+        const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
+        
+        const invalidFiles: { path: string; missing: string[] }[] = [];
+        
+        for (const entry of entries) {
+          if (!entry.path.endsWith(".md")) continue;
+          try {
+            const text = await readText(root, entry.path);
+            const { frontmatter } = parseMarkdown(text);
+            
+            const missing = required_fields.filter(f => !(f in frontmatter));
+            if (missing.length > 0) {
+              invalidFiles.push({ path: entry.path, missing });
+            }
+          } catch {
+            // ignore unreadable files
+          }
+        }
+        
+        return ok({ 
+          status: invalidFiles.length === 0 ? "success" : "failed",
+          scanned: entries.length,
+          invalidCount: invalidFiles.length,
+          invalidFiles 
+        });
       } catch (err) {
         return fail(err);
       }
