@@ -2,7 +2,7 @@
 
 A remote **Model Context Protocol (MCP)** server that exposes a personal LLM-Wiki second brain — an Obsidian vault maintained by an LLM librarian — over the public internet via a Cloudflare Tunnel. No inbound ports, no VPN.
 
-Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) and the skills in [NicholasSpisak/second-brain](https://github.com/NicholasSpisak/second-brain), plus architectural borrowings from [jimprosser/obsidian-web-mcp](https://github.com/jimprosser/obsidian-web-mcp).
+Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
 
 ## What it does
 
