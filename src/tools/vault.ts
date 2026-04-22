@@ -421,6 +421,46 @@ Returns:
       return ok({ updated, files: report, ...commit });
     },
   );
+
+  // ---- vault_apply_template -----------------------------------------------
+  server.registerTool(
+    "vault_apply_template",
+    {
+      title: "Apply a template",
+      description: `Reads a markdown template from the vault, substitutes {{variables}}, and writes it to a new file.
+
+Args:
+  - template_path (string): Vault-relative path to the template file.
+  - destination_path (string): Vault-relative path for the new file.
+  - variables (object): Key-value pairs for substitution. E.g., {"date": "2026-04-22"}.
+
+Returns:
+  { "path", "bytes", "committed", "sha" }`,
+      inputSchema: {
+        template_path: VaultPath,
+        destination_path: VaultPath,
+        variables: z.record(z.string()).default({}),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ template_path, destination_path, variables }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        let templateContent = await readText(cfg.VAULT_ROOT, template_path);
+        
+        // simple {{var}} substitution
+        for (const [key, value] of Object.entries(variables)) {
+          templateContent = templateContent.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), value);
+        }
+
+        const res = await writeTextAtomic(cfg.VAULT_ROOT, destination_path, templateContent, { createParents: true });
+        const commit = await maybeAutocommit(cfg, `vault_apply_template: ${template_path} -> ${destination_path}`);
+        return ok({ path: res.relPath, bytes: res.bytes, ...commit });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
 }
 
 // Re-export helpers so wiki tools can reuse them.
