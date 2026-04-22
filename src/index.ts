@@ -81,6 +81,13 @@ async function main() {
         return originalWrite(chunk, ...args);
       } as any;
       
+      // Also intercept setHeader to see headers being set
+      const originalSetHeader = res.setHeader.bind(res);
+      res.setHeader = function(name: string, value: any) {
+        console.error(`[Response] setHeader("${name}", ${JSON.stringify(value).substring(0, 50)})`);
+        return originalSetHeader(name, value);
+      } as any;
+      
       res.on("error", (err) => {
         console.error(`Response ERROR event: ${err.message}`);
         console.error(err.stack);
@@ -88,12 +95,18 @@ async function main() {
       
       try {
         console.error("Calling transport.handleRequest()...");
+        console.error(`Request headers:`, req.headers);
+        console.error(`Request method: ${req.method}`);
+        console.error(`Response writable: ${res.writable}`);
+        
         // Pass parsed body to transport
         await transport.handleRequest(req, res, (req as any).body);
         const duration = Date.now() - startTime;
         console.error(`✓ transport.handleRequest() completed in ${duration}ms`);
         console.error(`Response status code: ${res.statusCode}`);
         console.error(`Response headers sent: ${res.headersSent}`);
+        console.error(`Response writable: ${res.writable}`);
+        console.error(`Response finished: ${res.writableEnded}`);
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
