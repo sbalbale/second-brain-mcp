@@ -311,6 +311,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       },
     },
     async ({ content, title }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
         const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -337,6 +338,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       },
     },
     async ({ url, filename }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const res = await fetch(url);
         if (!res.ok) throw new Error(`Failed to fetch URL: ${res.statusText}`);

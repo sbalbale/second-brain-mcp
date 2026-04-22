@@ -403,6 +403,7 @@ Returns:
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
     async ({ paths, updates, array_strategy }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       const report: { path: string; ok: boolean; error?: string }[] = [];
       let updated = 0;
       for (const p of paths) {

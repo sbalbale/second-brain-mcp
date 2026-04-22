@@ -20,6 +20,7 @@ const ConfigSchema = z.object({
   CF_ACCESS_AUD: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
   VAULT_AUTOCOMMIT: boolFromEnv.default("true"),
   DEFAULT_RESPONSE_FORMAT: z.enum(["markdown", "json"]).default("markdown"),
+  READ_ONLY: boolFromEnv.default("false"),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
