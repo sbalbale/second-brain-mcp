@@ -1,7 +1,6 @@
 import express from "express";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { randomUUID } from "node:crypto";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { buildAuthMiddleware, assertAuthConfigured } from "./auth.js";
@@ -31,10 +30,13 @@ async function main() {
     const server = createServer(config);
     console.error("Server created");
     
+    // Use stateless mode: no session ID required
+    // This is better for HTTP clients connecting over the internet
+    // Stateful mode would require the client to track session IDs
     const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => randomUUID(),
+      sessionIdGenerator: undefined,
     });
-    console.error("Transport created");
+    console.error("Transport created (stateless mode)");
     
     // Connect the server to the transport immediately
     await server.connect(transport);
