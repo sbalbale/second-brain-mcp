@@ -86,18 +86,24 @@ async function main() {
         return originalEnd(...args);
       };
       
+      // Catch any errors from the response object itself
+      res.on("error", (err) => {
+        console.error(`Response error event: ${err.message}`);
+        console.error(err.stack);
+      });
+      
       try {
         console.error("Calling transport.handleRequest()...");
         await transport.handleRequest(req, res);
+        console.error(`transport.handleRequest() completed`);
       } catch (err) {
         const duration = Date.now() - startTime;
         const errorMessage = err instanceof Error ? err.message : String(err);
         const errorStack = err instanceof Error ? err.stack : "";
-        console.error(`✗ ERROR after ${duration}ms: ${errorMessage}`);
+        console.error(`✗ EXCEPTION in transport.handleRequest() after ${duration}ms: ${errorMessage}`);
         if (errorStack) {
           console.error(`Stack trace:\n${errorStack}`);
         }
-        console.error(`=== MCP Request End (with error) ===\n`);
         
         if (!res.headersSent) {
           try {
