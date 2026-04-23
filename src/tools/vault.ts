@@ -495,8 +495,8 @@ Returns:
       inputSchema: {
         path: VaultPath,
         canvas: z.object({
-          nodes: z.array(z.any()),
-          edges: z.array(z.any())
+          nodes: z.array(z.object({}).passthrough()),
+          edges: z.array(z.object({}).passthrough())
         }).passthrough(),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
