@@ -45,7 +45,7 @@ npm run dev                 # TRANSPORT=stdio for Claude Desktop local
 See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end walkthrough. The short version:
 
 1. On the vault machine, install Docker + `cloudflared`.
-2. In the Cloudflare Zero Trust dashboard, create a Tunnel, pick a public hostname (e.g. `vault.cherrybrooknetworks.dev`), route it to `http://mcp:8787`, and copy the tunnel token.
+2. In the Cloudflare Zero Trust dashboard, create a Tunnel, pick a public hostname (e.g. `vault.yourdomain.com`), route it to `http://mcp:8787`, and copy the tunnel token.
 3. Create a Cloudflare Access application for that hostname (email-gated is easiest). Note the Application Audience (AUD) tag.
 4. Fill in `.env` next to `docker-compose.yml` with `VAULT_PATH`, `AUTH_TOKEN`, `CF_TUNNEL_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
 5. `docker compose up -d`.
