@@ -1,9 +1,28 @@
 import express from "express";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { buildAuthMiddleware, assertAuthConfigured } from "./auth.js";
+
+type SessionContext = {
+  transport: StreamableHTTPServerTransport;
+  server: McpServer;
+};
+
+function isInitializeRequest(body: unknown): boolean {
+  if (Array.isArray(body)) {
+    return body.some((m) => isInitializeRequest(m));
+  }
+
+  if (!body || typeof body !== "object") {
+    return false;
+  }
+
+  const msg = body as { method?: unknown };
+  return msg.method === "initialize";
+}
 
 async function main() {
   const config = loadConfig();
@@ -61,21 +80,32 @@ async function main() {
       res.json({ status: "ok", vault: config.VAULT_ROOT });
     });
 
-    const server = createServer(config);
-    console.error("Server created");
+    const sessions = new Map<string, SessionContext>();
 
-    // Use stateful mode with session management
-    // Each client gets a session ID to maintain request/response correlation
-    // Note: enableJsonResponse is disabled in stateful mode - the SDK handles session
-    // management via Mcp-Session-Id header and requires proper SSE/streaming for stateful clients
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: () => crypto.randomUUID(),
-      enableJsonResponse: false,
-    });
+    async function createSessionTransport(): Promise<SessionContext> {
+      const server = createServer(config);
 
-    // Connect the server to the transport once at startup
-    await server.connect(transport);
-    console.error("Server connected to transport");
+      // Stateful mode requires one transport instance per initialized session.
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => crypto.randomUUID(),
+        enableJsonResponse: false,
+      });
+
+      transport.onclose = () => {
+        const sid = transport.sessionId;
+        if (sid) {
+          sessions.delete(sid);
+          console.error(`[MCP] Session closed: ${sid}`);
+        }
+      };
+
+      transport.onerror = (err) => {
+        console.error(`[MCP] Transport error: ${err.message}`);
+      };
+
+      await server.connect(transport);
+      return { transport, server };
+    }
 
     // Auth middleware
     const auth = buildAuthMiddleware(config);
@@ -86,9 +116,52 @@ async function main() {
       console.error(`[MCP] Headers: accept="${req.get("accept")}"`);
       
       try {
+        const sessionIdHeader = req.get("mcp-session-id");
+        const body = (req as any).body;
+        const initializing = req.method === "POST" && isInitializeRequest(body);
+
+        let sessionContext: SessionContext | undefined;
+        if (sessionIdHeader) {
+          sessionContext = sessions.get(sessionIdHeader);
+        } else if (initializing) {
+          sessionContext = await createSessionTransport();
+          console.error("[MCP] Created fresh transport for initialize request");
+        }
+
+        if (!sessionContext) {
+          if (sessionIdHeader) {
+            res.status(404).json({
+              jsonrpc: "2.0",
+              error: {
+                code: -32001,
+                message: "Session not found",
+              },
+              id: null,
+            });
+            return;
+          }
+
+          res.status(400).json({
+            jsonrpc: "2.0",
+            error: {
+              code: -32000,
+              message: "Bad Request: Mcp-Session-Id header is required",
+            },
+            id: null,
+          });
+          return;
+        }
+
         // Pass parsed body to transport - only pass body for requests that have content
         const bodyToPass = req.method === 'GET' ? undefined : (req as any).body;
-        await transport.handleRequest(req, res, bodyToPass);
+        await sessionContext.transport.handleRequest(req, res, bodyToPass);
+
+        const newSessionId = sessionContext.transport.sessionId;
+        if (initializing && newSessionId) {
+          sessions.set(newSessionId, sessionContext);
+          console.error(`[MCP] Session initialized: ${newSessionId}`);
+        }
+
         console.error(`[MCP] Request handled successfully`);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
