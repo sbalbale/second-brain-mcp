@@ -20,7 +20,7 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 
 # ripgrep for fast vault search; git so auto-commit works
-RUN apk add --no-cache ripgrep git tini
+RUN apk add --no-cache ripgrep git tini openssh-client
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
