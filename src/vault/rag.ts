@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
+
 export interface Chunk {
   path: string;
   text: string;
@@ -29,9 +30,9 @@ export function cosineSimilarity(a: number[], b: number[]) {
  * Generates an embedding using Google's text-embedding-004 model.
  * Free tier is available for Gemini.
  */
-export async function generateEmbedding(text: string, apiKey: string): Promise<number[]> {
+export async function generateEmbedding(text: string, apiKey: string, modelName: string = "gemini-embedding-2"): Promise<number[]> {
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
+  const model = genAI.getGenerativeModel({ model: modelName });
   const result = await model.embedContent(text);
   return result.embedding.values;
 }

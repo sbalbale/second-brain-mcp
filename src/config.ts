@@ -23,6 +23,7 @@ const ConfigSchema = z.object({
   READ_ONLY: boolFromEnv.default("false"),
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default("gemini-embedding-2"),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

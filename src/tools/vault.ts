@@ -545,7 +545,7 @@ Returns:
 
             index.chunks = index.chunks.filter(c => c.path !== entry.path);
 
-            const embedding = await generateEmbedding(text, apiKey);
+            const embedding = await generateEmbedding(text, apiKey, cfg.GEMINI_MODEL);
             index.chunks.push({ path: entry.path, text, embedding });
             indexed++;
           } catch {
@@ -577,7 +577,7 @@ Returns:
       const apiKey = cfg.GEMINI_API_KEY || cfg.OPENAI_API_KEY;
       if (!apiKey) return fail(new Error("No API key configured for embeddings."));
       try {
-        const queryEmbedding = await generateEmbedding(query, apiKey);
+        const queryEmbedding = await generateEmbedding(query, apiKey, cfg.GEMINI_MODEL);
         const index = await loadIndex(cfg.VAULT_ROOT);
         const results = await searchIndex(index, queryEmbedding, limit);
         return ok({ count: results.length, results: results.map(r => ({ path: r.path, score: r.score })), provider: cfg.GEMINI_API_KEY ? "gemini" : "openai" });
