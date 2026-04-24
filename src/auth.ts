@@ -4,6 +4,10 @@ import type { Config } from "./config.js";
 
 export interface AuthInfo {
   token?: string;
+  oauth?: {
+    sub?: string;
+    aud?: string | string[];
+  };
   cloudflareAccess?: {
     audience: string;
     issuer: string;
@@ -13,42 +17,92 @@ export interface AuthInfo {
 /**
  * Build Express middleware that enforces:
  *   1. A static bearer token (Authorization: Bearer <AUTH_TOKEN>), if set.
- *   2. A Cloudflare Access JWT (Cf-Access-Jwt-Assertion), if CF_ACCESS_AUD is set.
+ *   2. An OAuth JWT (Authorization: Bearer <JWT>), if OAUTH_ISSUER is set.
+ *   3. A Cloudflare Access JWT (Cf-Access-Jwt-Assertion), if CF_ACCESS_AUD is set.
  *
- * Either or both may be enabled. If neither is configured the server will
- * refuse to start for any non-loopback bind to avoid accidentally exposing
- * an unauthenticated vault to the internet.
+ * If both AUTH_TOKEN and OAuth are configured, the Authorization header is checked
+ * against both (OAuth first).
  */
 export function buildAuthMiddleware(config: Config) {
-  const jwks = config.CF_ACCESS_TEAM_DOMAIN
+  const cfJwks = config.CF_ACCESS_TEAM_DOMAIN
     ? createRemoteJWKSet(
         new URL(`https://${config.CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`),
+      )
+    : null;
+
+  const oauthJwks = config.OAUTH_ISSUER
+    ? createRemoteJWKSet(
+        new URL(".well-known/jwks.json", config.OAUTH_ISSUER),
       )
     : null;
 
   return async function authMiddleware(req: Request & { auth?: AuthInfo }, res: Response, next: NextFunction) {
     const authInfo: AuthInfo = {};
 
-    // Bearer token (required when configured).
-    if (config.AUTH_TOKEN) {
+    // 1. Authorization header (Static Bearer or OAuth JWT)
+    if (config.AUTH_TOKEN || (config.OAUTH_ISSUER && oauthJwks)) {
       const hdr = req.header("authorization") ?? "";
       const match = hdr.match(/^Bearer\s+(.+)$/i);
-      if (!match || !timingSafeEqual(match[1] ?? "", config.AUTH_TOKEN)) {
-        res.status(401).json({ error: "invalid or missing bearer token" });
+      const token = match?.[1];
+
+      if (!token) {
+        res.status(401).json({ error: "missing bearer token" });
         return;
       }
-      authInfo.token = match[1];
+
+      let authenticated = false;
+
+      // Try OAuth first if configured
+      if (config.OAUTH_ISSUER && config.OAUTH_AUDIENCE && oauthJwks) {
+        try {
+          const { payload } = await jwtVerify(token, oauthJwks, {
+            audience: config.OAUTH_AUDIENCE,
+            issuer: config.OAUTH_ISSUER,
+          });
+          authInfo.oauth = {
+            sub: payload.sub,
+            aud: payload.aud,
+          };
+          authenticated = true;
+        } catch (err) {
+          // If ONLY OAuth is configured for Authorization header, fail now
+          if (!config.AUTH_TOKEN) {
+            res.status(401).json({
+              error: "OAuth JWT verification failed",
+              detail: err instanceof Error ? err.message : String(err),
+            });
+            return;
+          }
+          // Otherwise, fall back to static token check
+        }
+      }
+
+      // Try static token if not already authenticated by OAuth
+      if (!authenticated && config.AUTH_TOKEN) {
+        if (timingSafeEqual(token, config.AUTH_TOKEN)) {
+          authInfo.token = token;
+          authenticated = true;
+        } else {
+          res.status(401).json({ error: "invalid bearer token" });
+          return;
+        }
+      }
+
+      if (!authenticated) {
+        res.status(401).json({ error: "authentication failed" });
+        return;
+      }
     }
 
-    // Cloudflare Access JWT (required when CF_ACCESS_AUD is set).
-    if (config.CF_ACCESS_AUD && jwks && config.CF_ACCESS_TEAM_DOMAIN) {
+    // 2. Cloudflare Access JWT (required when CF_ACCESS_AUD is set).
+    if (config.CF_ACCESS_AUD && cfJwks && config.CF_ACCESS_TEAM_DOMAIN) {
       const token = req.header("cf-access-jwt-assertion") ?? "";
       if (!token) {
         res.status(401).json({ error: "missing Cf-Access-Jwt-Assertion header" });
         return;
       }
       try {
-        await jwtVerify(token, jwks, {
+        await jwtVerify(token, cfJwks, {
           audience: config.CF_ACCESS_AUD,
           issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
         });
@@ -73,10 +127,10 @@ export function buildAuthMiddleware(config: Config) {
 
 export function assertAuthConfigured(config: Config): void {
   const loopbackBind = config.HOST === "127.0.0.1" || config.HOST === "::1" || config.HOST === "localhost";
-  const hasAuth = Boolean(config.AUTH_TOKEN) || Boolean(config.CF_ACCESS_AUD);
+  const hasAuth = Boolean(config.AUTH_TOKEN) || Boolean(config.CF_ACCESS_AUD) || Boolean(config.OAUTH_ISSUER);
   if (!hasAuth && !loopbackBind) {
     throw new Error(
-      `Refusing to start: HOST=${config.HOST} is non-loopback but no AUTH_TOKEN or CF_ACCESS_AUD is set. ` +
+      `Refusing to start: HOST=${config.HOST} is non-loopback but no AUTH_TOKEN, OAUTH_ISSUER, or CF_ACCESS_AUD is set. ` +
         `Set at least one (both recommended) or bind to 127.0.0.1.`,
     );
   }
