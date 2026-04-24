@@ -13,7 +13,7 @@ import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontma
 import { searchText } from "../vault/search.js";
 import { scanWikiPages } from "../vault/links.js";
 import { gitCommitAll } from "../vault/git.js";
-import { generateEmbedding, batchEmbedContents, loadIndex, saveIndex, searchIndex } from "../vault/rag.js";
+import { generateEmbedding, generateEmbeddingWithRetry, batchEmbedContents, batchEmbedContentsWithRetry, loadIndex, saveIndex, searchIndex } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
@@ -553,8 +553,10 @@ Returns:
         }
 
         if (toIndex.length > 0) {
-          // Process in batches of 100 (Gemini limit)
-          const batchSize = 100;
+          // Process in batches. Gemini supports up to 100, but we use 50 for free tier
+          // to stay under RPM (Requests Per Minute) limits as suggested.
+          const batchSize = cfg.GEMINI_FREE_TIER ? 50 : 100;
+          
           for (let i = 0; i < toIndex.length; i += batchSize) {
             const batch = toIndex.slice(i, i + batchSize);
             
@@ -563,22 +565,19 @@ Returns:
             index.chunks = index.chunks.filter(c => !batchPaths.has(c.path));
 
             if (cfg.GEMINI_API_KEY) {
-              const embeddings = await batchEmbedContents(batch.map(b => b.text), apiKey, cfg.GEMINI_MODEL);
+              const embeddings = await batchEmbedContentsWithRetry(batch.map(b => b.text), apiKey, cfg.GEMINI_MODEL);
               batch.forEach((item, idx) => {
                 index.chunks.push({ path: item.path, text: item.text, embedding: embeddings[idx]! });
               });
 
-              // Rate limiting for Free Tier:
-              // 1500 RPM (25 RPS) but also restricted by overall daily/monthly quotas.
-              // To be safe and avoid "429 Too Many Requests", we add a small delay between batches.
+              // Even with retries, we add a small delay between successful batches on free tier
               if (cfg.GEMINI_FREE_TIER && i + batchSize < toIndex.length) {
-                console.error(`[RAG] Free tier rate limiting: Waiting 1s before next batch...`);
                 await new Promise(r => setTimeout(r, 1000));
               }
             } else {
               // OpenAI fallback (sequential for simplicity as this request is focused on Gemini)
               for (const item of batch) {
-                const embedding = await generateEmbedding(item.text, apiKey);
+                const embedding = await generateEmbeddingWithRetry(item.text, apiKey);
                 index.chunks.push({ path: item.path, text: item.text, embedding });
               }
             }
@@ -621,7 +620,7 @@ Returns:
           await new Promise(r => setTimeout(r, 500));
         }
 
-        const queryEmbedding = await generateEmbedding(query, apiKey, cfg.GEMINI_MODEL);
+        const queryEmbedding = await generateEmbeddingWithRetry(query, apiKey, cfg.GEMINI_MODEL);
 
         const index = await loadIndex(cfg.VAULT_ROOT);
         const results = await searchIndex(index, queryEmbedding, limit);

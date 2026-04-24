@@ -38,6 +38,35 @@ export async function generateEmbedding(text: string, apiKey: string, modelName:
 }
 
 /**
+ * Wrapper for generateEmbedding with exponential backoff for 429 (Rate Limit) errors.
+ */
+export async function generateEmbeddingWithRetry(
+  text: string,
+  apiKey: string,
+  modelName: string = "gemini-embedding-2",
+  maxRetries: number = 5
+): Promise<number[]> {
+  let retries = 0;
+  while (true) {
+    try {
+      return await generateEmbedding(text, apiKey, modelName);
+    } catch (err: any) {
+      const errorText = String(err?.message || "");
+      const isRateLimit = errorText.includes("429") || err?.status === 429 || errorText.toLowerCase().includes("too many requests");
+      
+      if (isRateLimit && retries < maxRetries) {
+        const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000;
+        console.error(`[RAG] Rate limited (429). Retrying in ${Math.round(delay)}ms... (Attempt ${retries + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, delay));
+        retries++;
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+/**
  * Generates embeddings for multiple texts in a single batch call.
  * This is more efficient and helps stay within rate limits for free tier.
  */
@@ -53,6 +82,37 @@ export async function batchEmbedContents(texts: string[], apiKey: string, modelN
   });
   
   return result.embeddings.map(e => e.values);
+}
+
+/**
+ * Wrapper for batchEmbedContents with exponential backoff for 429 (Rate Limit) errors.
+ */
+export async function batchEmbedContentsWithRetry(
+  texts: string[],
+  apiKey: string,
+  modelName: string = "gemini-embedding-2",
+  maxRetries: number = 5
+): Promise<number[][]> {
+  let retries = 0;
+  while (true) {
+    try {
+      return await batchEmbedContents(texts, apiKey, modelName);
+    } catch (err: any) {
+      // Check for 429 error in message or status
+      const errorText = String(err?.message || "");
+      const isRateLimit = errorText.includes("429") || err?.status === 429 || errorText.toLowerCase().includes("too many requests");
+      
+      if (isRateLimit && retries < maxRetries) {
+        // Exponential backoff: 2^retries * 1000ms + jitter
+        const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000;
+        console.error(`[RAG] Rate limited (429). Retrying in ${Math.round(delay)}ms... (Attempt ${retries + 1}/${maxRetries})`);
+        await new Promise(r => setTimeout(r, delay));
+        retries++;
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 export async function loadIndex(vaultRoot: string): Promise<Index> {
