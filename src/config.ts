@@ -13,6 +13,10 @@ const ConfigSchema = z.object({
   HOST: z.string().default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
   AUTH_TOKEN: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
+  OAUTH_ISSUER: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
+  OAUTH_AUDIENCE: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
+  OAUTH_AUTH_ENDPOINT: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
+  OAUTH_TOKEN_ENDPOINT: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
   CF_ACCESS_TEAM_DOMAIN: z
     .string()
     .optional()
@@ -24,7 +28,19 @@ const ConfigSchema = z.object({
   OPENAI_API_KEY: z.string().optional(),
   GEMINI_API_KEY: z.string().optional(),
   GEMINI_MODEL: z.string().default("gemini-embedding-2"),
-});
+}).refine(
+  (data) => {
+    const hasAnyOAuth = !!(data.OAUTH_ISSUER || data.OAUTH_AUDIENCE || data.OAUTH_AUTH_ENDPOINT || data.OAUTH_TOKEN_ENDPOINT);
+    if (hasAnyOAuth) {
+      return !!(data.OAUTH_ISSUER && data.OAUTH_AUDIENCE && data.OAUTH_AUTH_ENDPOINT && data.OAUTH_TOKEN_ENDPOINT);
+    }
+    return true;
+  },
+  {
+    message: "OAUTH_ISSUER, OAUTH_AUDIENCE, OAUTH_AUTH_ENDPOINT, and OAUTH_TOKEN_ENDPOINT must all be set if using OAuth",
+    path: ["OAUTH_ISSUER"],
+  },
+);
 
 export type Config = z.infer<typeof ConfigSchema>;
 

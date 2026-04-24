@@ -80,6 +80,22 @@ async function main() {
       res.json({ status: "ok", vault: config.VAULT_ROOT });
     });
 
+    // OAuth Discovery Endpoint for Claude Web Connectors
+    app.get("/.well-known/oauth-authorization-server", (req, res) => {
+      if (!config.OAUTH_ISSUER) {
+        return res.status(404).json({ error: "OAuth is not configured on this server." });
+      }
+      
+      res.json({
+        issuer: config.OAUTH_ISSUER,
+        authorization_endpoint: config.OAUTH_AUTH_ENDPOINT,
+        token_endpoint: config.OAUTH_TOKEN_ENDPOINT,
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        code_challenge_methods_supported: ["S256"]
+      });
+    });
+
     const sessions = new Map<string, SessionContext>();
 
     async function createSessionTransport(): Promise<SessionContext> {
