@@ -38,85 +38,82 @@ export function buildAuthMiddleware(config: Config) {
 
   return async function authMiddleware(req: Request & { auth?: AuthInfo }, res: Response, next: NextFunction) {
     const authInfo: AuthInfo = {};
+    const requirements: { bearer?: boolean; cloudflare?: boolean } = {};
+    const results: { bearer?: boolean; cloudflare?: boolean } = {};
 
-    // 1. Authorization header (Static Bearer or OAuth JWT)
+    // Determine what is required based on config
     if (config.AUTH_TOKEN || (config.OAUTH_ISSUER && oauthJwks)) {
+      requirements.bearer = true;
+    }
+    if (config.CF_ACCESS_AUD && cfJwks && config.CF_ACCESS_TEAM_DOMAIN) {
+      requirements.cloudflare = true;
+    }
+
+    // 1. Check Authorization header (Static Bearer or OAuth JWT)
+    if (requirements.bearer) {
       const hdr = req.header("authorization") ?? "";
       const match = hdr.match(/^Bearer\s+(.+)$/i);
       const token = match?.[1];
 
-      if (!token) {
-        res.status(401).json({ error: "missing bearer token" });
-        return;
-      }
-
-      let authenticated = false;
-
-      // Try OAuth first if configured
-      if (config.OAUTH_ISSUER && config.OAUTH_AUDIENCE && oauthJwks) {
-        try {
-          const { payload } = await jwtVerify(token, oauthJwks, {
-            audience: config.OAUTH_AUDIENCE,
-            issuer: config.OAUTH_ISSUER,
-          });
-          authInfo.oauth = {
-            sub: payload.sub,
-            aud: payload.aud,
-          };
-          authenticated = true;
-        } catch (err) {
-          // If ONLY OAuth is configured for Authorization header, fail now
-          if (!config.AUTH_TOKEN) {
-            res.status(401).json({
-              error: "OAuth JWT verification failed",
-              detail: err instanceof Error ? err.message : String(err),
+      if (token) {
+        // Try OAuth first if configured
+        if (config.OAUTH_ISSUER && config.OAUTH_AUDIENCE && oauthJwks) {
+          try {
+            const { payload } = await jwtVerify(token, oauthJwks, {
+              audience: config.OAUTH_AUDIENCE,
+              issuer: config.OAUTH_ISSUER,
             });
-            return;
+            authInfo.oauth = {
+              sub: payload.sub,
+              aud: payload.aud,
+            };
+            results.bearer = true;
+          } catch (err) {
+            // Log error but don't fail yet, might have static token fallback
+            console.error(`OAuth verification failed: ${err instanceof Error ? err.message : String(err)}`);
           }
-          // Otherwise, fall back to static token check
         }
-      }
 
-      // Try static token if not already authenticated by OAuth
-      if (!authenticated && config.AUTH_TOKEN) {
-        if (timingSafeEqual(token, config.AUTH_TOKEN)) {
-          authInfo.token = token;
-          authenticated = true;
-        } else {
-          res.status(401).json({ error: "invalid bearer token" });
-          return;
+        // Try static token if not already authenticated by OAuth
+        if (!results.bearer && config.AUTH_TOKEN) {
+          if (timingSafeEqual(token, config.AUTH_TOKEN)) {
+            authInfo.token = token;
+            results.bearer = true;
+          }
         }
-      }
-
-      if (!authenticated) {
-        res.status(401).json({ error: "authentication failed" });
-        return;
       }
     }
 
-    // 2. Cloudflare Access JWT (required when CF_ACCESS_AUD is set).
-    if (config.CF_ACCESS_AUD && cfJwks && config.CF_ACCESS_TEAM_DOMAIN) {
+    // 2. Check Cloudflare Access JWT
+    if (requirements.cloudflare) {
       const token = req.header("cf-access-jwt-assertion") ?? "";
-      if (!token) {
-        res.status(401).json({ error: "missing Cf-Access-Jwt-Assertion header" });
-        return;
+      if (token) {
+        try {
+          await jwtVerify(token, cfJwks!, {
+            audience: config.CF_ACCESS_AUD!,
+            issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
+          });
+          authInfo.cloudflareAccess = {
+            audience: config.CF_ACCESS_AUD!,
+            issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}!`,
+          };
+          results.cloudflare = true;
+        } catch (err) {
+          console.error(`Cloudflare Access verification failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
-      try {
-        await jwtVerify(token, cfJwks, {
-          audience: config.CF_ACCESS_AUD,
-          issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
-        });
-        authInfo.cloudflareAccess = {
-          audience: config.CF_ACCESS_AUD,
-          issuer: `https://${config.CF_ACCESS_TEAM_DOMAIN}`,
-        };
-      } catch (err) {
-        res.status(401).json({
-          error: "Cloudflare Access JWT verification failed",
-          detail: err instanceof Error ? err.message : String(err),
-        });
-        return;
-      }
+    }
+
+    // Final Validation:
+    // If a method is configured, it MUST be present and valid.
+    // This supports AND logic when both headers are expected.
+    if (requirements.bearer && !results.bearer) {
+      res.status(401).json({ error: "Invalid or missing Bearer/OAuth token" });
+      return;
+    }
+    if (requirements.cloudflare && !results.cloudflare) {
+      res.status(401).json({ error: "Invalid or missing Cloudflare Access JWT" });
+      return;
     }
 
     // Attach auth info to request for MCP transport to use
