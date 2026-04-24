@@ -37,6 +37,24 @@ export async function generateEmbedding(text: string, apiKey: string, modelName:
   return result.embedding.values;
 }
 
+/**
+ * Generates embeddings for multiple texts in a single batch call.
+ * This is more efficient and helps stay within rate limits for free tier.
+ */
+export async function batchEmbedContents(texts: string[], apiKey: string, modelName: string = "gemini-embedding-2"): Promise<number[][]> {
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: modelName });
+  
+  // Gemini supports up to 100 texts per batch
+  const result = await model.batchEmbedContents({
+    requests: texts.map(text => ({
+      content: { role: "user", parts: [{ text }] },
+    })),
+  });
+  
+  return result.embeddings.map(e => e.values);
+}
+
 export async function loadIndex(vaultRoot: string): Promise<Index> {
   const p = path.join(vaultRoot, ".rag-index.json");
   try {
