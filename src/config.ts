@@ -23,7 +23,10 @@ const ConfigSchema = z.object({
     .transform((v) => (v && v.length > 0 ? v : undefined)),
   CF_ACCESS_AUD: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
   VAULT_AUTOCOMMIT: boolFromEnv.default("true"),
-  DEFAULT_RESPONSE_FORMAT: z.enum(["markdown", "json"]).default("markdown"),
+  DEFAULT_RESPONSE_FORMAT: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z.enum(["markdown", "json"]).default("markdown"),
+  ),
   READ_ONLY: boolFromEnv.default("false"),
 }).refine(
   (data) => {
