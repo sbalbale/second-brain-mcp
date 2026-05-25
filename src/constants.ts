@@ -13,3 +13,4 @@ export const OUTPUT_DIR = "output";
 
 export const INDEX_FILE = "wiki/index.md";
 export const LOG_FILE = "wiki/log.md";
+export const RAG_INDEX_STATUS_FILE = "output/qmd-index-status.json";

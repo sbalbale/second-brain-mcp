@@ -13,7 +13,7 @@ import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontma
 import { searchText } from "../vault/search.js";
 import { scanWikiPages } from "../vault/links.js";
 import { gitCommitAll } from "../vault/git.js";
-import { qmdUpdate, qmdEmbed, qmdQuery } from "../vault/rag.js";
+import { qmdQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
@@ -182,7 +182,7 @@ Returns:
           finalText = frontmatter ? buildMarkdown(frontmatter, content) : content;
         }
         const res = await writeTextAtomic(cfg.VAULT_ROOT, rel, finalText, { createParents: true });
-        try { qmdUpdate(); } catch { /* qmd unavailable — index will be stale until next vault_rag_index */ }
+        startQmdUpdate(cfg.VAULT_ROOT);
         const commit = await maybeAutocommit(cfg, commit_message ?? `vault_write: ${rel}`);
         return ok({ path: res.relPath, bytes: res.bytes, ...commit });
       } catch (err) {
@@ -521,16 +521,44 @@ Returns:
     "vault_rag_index",
     {
       title: "Index vault for semantic search",
-      description: "Runs qmd update (BM25) then qmd embed (vector) to fully index the vault. Uses local GGUF models via qmd — no API key required.",
+      description: "Starts a background qmd update (BM25) + qmd embed (vector) job to fully index the vault. Uses local GGUF models via qmd — no API key required.",
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
-        qmdUpdate();
-        qmdEmbed();
-        return ok({ status: "success", provider: "qmd" });
+        const status = await startQmdIndexing(cfg.VAULT_ROOT);
+        return ok({
+          status: "started",
+          provider: "qmd",
+          jobId: status.jobId,
+          phase: status.phase,
+          statusFile: "output/qmd-index-status.json",
+          message: "Indexing continues in the background; check output/qmd-index-status.json for progress and completion.",
+        });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- vault_rag_status ---------------------------------------------------
+  server.registerTool(
+    "vault_rag_status",
+    {
+      title: "Read semantic index job status",
+      description: "Returns the current qmd indexing job status from output/qmd-index-status.json, including the last known phase and completion state.",
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async () => {
+      try {
+        const status = await readQmdIndexStatus(cfg.VAULT_ROOT);
+        return ok({
+          found: status !== null,
+          status,
+        });
       } catch (err) {
         return fail(err);
       }

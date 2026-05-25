@@ -49,7 +49,7 @@ qmd collection add /path/to/your/vault --name vault
 qmd context add qmd://vault "your personal knowledge base description"
 ```
 
-Then call `vault_rag_index` from your MCP client to build the initial index (downloads ~2 GB of models on first run).
+Then call `vault_rag_index` from your MCP client to build the initial index (downloads ~2 GB of models on first run). Use `vault_rag_status` to check whether the background job is still running or has finished.
 
 ## Quick start (remote, Cloudflare Tunnel)
 
@@ -60,7 +60,7 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 3. Create a Cloudflare Access application for that hostname (email-gated is easiest). Note the Application Audience (AUD) tag.
 4. Fill in `.env` next to `docker-compose.yml` with `VAULT_PATH`, `AUTH_TOKEN`, `CF_TUNNEL_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
 5. `docker compose up -d` — qmd is installed in the image and auto-configured on first start via the entrypoint script.
-6. Call `vault_rag_index` from your MCP client once to build the initial index (downloads ~2 GB of GGUF models into the `qmd-models` Docker volume on first run).
+6. Call `vault_rag_index` from your MCP client once to build the initial index. It now starts a background job and writes progress to `output/qmd-index-status.json` so the request returns before Cloudflare's 120-second timeout; the first run still downloads ~2 GB of GGUF models into the `qmd-models` Docker volume.
 7. Add the server to your MCP client (see [docs/clients.md](docs/clients.md)).
 
 ## Tools exposed
@@ -76,7 +76,8 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `vault_move` | Rename / relocate within the vault |
 | `vault_delete` | Soft-delete to `.trash/` |
 | `vault_frontmatter_update` | Merge frontmatter on one or many files |
-| `vault_rag_index` | Full re-index: runs `qmd update` (BM25) then `qmd embed` (vectors) |
+| `vault_rag_index` | Full re-index: starts a background `qmd update` (BM25) then `qmd embed` (vectors) job |
+| `vault_rag_status` | Read the current qmd indexing job status |
 | `vault_rag_search` | Hybrid semantic search (BM25 + vector + reranking) via local qmd |
 | `wiki_scaffold` | Create the LLM-Wiki directory structure + starter files |
 | `wiki_index_rebuild` | Rebuild `wiki/index.md` from filesystem state |
