@@ -12,8 +12,8 @@
 
 services:
   mcp:
-    build: .
-    image: second-brain-mcp:latest
+    image: ghcr.io/sbalbale/second-brain-mcp:latest
+    pull_policy: always
     restart: unless-stopped
     environment:
       VAULT_ROOT: /vault
