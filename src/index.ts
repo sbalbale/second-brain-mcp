@@ -2,6 +2,7 @@ import express from "express";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { format } from "node:util";
 import { loadConfig } from "./config.js";
 import { createServer } from "./server.js";
 import { buildAuthMiddleware, assertAuthConfigured } from "./auth.js";
@@ -10,6 +11,17 @@ type SessionContext = {
   transport: StreamableHTTPServerTransport;
   server: McpServer;
 };
+
+function installTimestampedConsole(): void {
+  const stamp = (args: unknown[]) => `${new Date().toISOString()} ${format(...args)}`;
+
+  for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]) => {
+      original(stamp(args));
+    };
+  }
+}
 
 function isInitializeRequest(body: unknown): boolean {
   if (Array.isArray(body)) {
@@ -25,6 +37,7 @@ function isInitializeRequest(body: unknown): boolean {
 }
 
 async function main() {
+  installTimestampedConsole();
   const config = loadConfig();
 
   if (config.TRANSPORT === "stdio") {

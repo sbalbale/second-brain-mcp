@@ -25,10 +25,6 @@ const ConfigSchema = z.object({
   VAULT_AUTOCOMMIT: boolFromEnv.default("true"),
   DEFAULT_RESPONSE_FORMAT: z.enum(["markdown", "json"]).default("markdown"),
   READ_ONLY: boolFromEnv.default("false"),
-  OPENAI_API_KEY: z.string().optional(),
-  GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().default("gemini-embedding-2"),
-  GEMINI_FREE_TIER: boolFromEnv.default("true"),
 }).refine(
   (data) => {
     const hasAnyOAuth = !!(data.OAUTH_ISSUER || data.OAUTH_AUDIENCE || data.OAUTH_AUTH_ENDPOINT || data.OAUTH_TOKEN_ENDPOINT);

@@ -3,7 +3,10 @@
     "allow": [
       "Bash(git -C \"C:\\\\Users\\\\seanb\\\\Documents\\\\second-brain-mcp\" status)",
       "WebFetch(domain:github.com)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(npm run *)",
+      "Bash(npx tsc *)",
+      "Bash(.\\\\node_modules\\\\.bin\\\\tsc --noEmit)"
     ]
   }
 }

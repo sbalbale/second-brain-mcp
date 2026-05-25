@@ -8,6 +8,7 @@ Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.
 
 - **Vault primitives** — read, write, list, search, move, soft-delete files in the vault, with path-traversal safety and atomic writes safe for Obsidian Sync.
 - **Wiki bookkeeping tools** — scaffold a fresh vault, rebuild the master index, append to the log, find unprocessed raw sources, scan for lint issues, return backlink graphs, show recent git diffs.
+- **Semantic search** — hybrid BM25 + vector search via [qmd](https://github.com/tobilu/qmd), running local GGUF models. No API key, no rate limits, no data leaving the server.
 - **Wiki workflow prompts** — `wiki_init`, `wiki_ingest`, `wiki_query`, `wiki_lint`. These return the playbook text from the upstream SKILL.md files so any MCP-capable LLM client can execute the LLM-Wiki workflows using the tools above.
 - **Remote access** — streamable HTTP transport, fronted by Cloudflare Tunnel + Cloudflare Access (OAuth). The vault machine opens no inbound ports.
 
@@ -40,6 +41,16 @@ npm install
 npm run dev                 # TRANSPORT=stdio for Claude Desktop local
 ```
 
+For semantic search, install and initialise qmd once:
+
+```bash
+npm install -g @tobilu/qmd
+qmd collection add /path/to/your/vault --name vault
+qmd context add qmd://vault "your personal knowledge base description"
+```
+
+Then call `vault_rag_index` from your MCP client to build the initial index (downloads ~2 GB of models on first run).
+
 ## Quick start (remote, Cloudflare Tunnel)
 
 See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end walkthrough. The short version:
@@ -48,8 +59,9 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 2. In the Cloudflare Zero Trust dashboard, create a Tunnel, pick a public hostname (e.g. `vault.yourdomain.com`), route it to `http://mcp:8787`, and copy the tunnel token.
 3. Create a Cloudflare Access application for that hostname (email-gated is easiest). Note the Application Audience (AUD) tag.
 4. Fill in `.env` next to `docker-compose.yml` with `VAULT_PATH`, `AUTH_TOKEN`, `CF_TUNNEL_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
-5. `docker compose up -d`.
-6. Add the server to your MCP client (see [docs/clients.md](docs/clients.md)).
+5. `docker compose up -d` — qmd is installed in the image and auto-configured on first start via the entrypoint script.
+6. Call `vault_rag_index` from your MCP client once to build the initial index (downloads ~2 GB of GGUF models into the `qmd-models` Docker volume on first run).
+7. Add the server to your MCP client (see [docs/clients.md](docs/clients.md)).
 
 ## Tools exposed
 
@@ -64,6 +76,8 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `vault_move` | Rename / relocate within the vault |
 | `vault_delete` | Soft-delete to `.trash/` |
 | `vault_frontmatter_update` | Merge frontmatter on one or many files |
+| `vault_rag_index` | Full re-index: runs `qmd update` (BM25) then `qmd embed` (vectors) |
+| `vault_rag_search` | Hybrid semantic search (BM25 + vector + reranking) via local qmd |
 | `wiki_scaffold` | Create the LLM-Wiki directory structure + starter files |
 | `wiki_index_rebuild` | Rebuild `wiki/index.md` from filesystem state |
 | `wiki_log_append` | Append a dated entry to `wiki/log.md` |
@@ -95,4 +109,4 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 
 ## License
 
-MIT — do whatever, no warranty.
+MIT — see [LICENSE](LICENSE)

@@ -13,7 +13,7 @@ import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontma
 import { searchText } from "../vault/search.js";
 import { scanWikiPages } from "../vault/links.js";
 import { gitCommitAll } from "../vault/git.js";
-import { generateEmbedding, generateEmbeddingWithRetry, batchEmbedContents, batchEmbedContentsWithRetry, loadIndex, saveIndex, searchIndex } from "../vault/rag.js";
+import { qmdUpdate, qmdEmbed, qmdQuery } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
@@ -182,6 +182,7 @@ Returns:
           finalText = frontmatter ? buildMarkdown(frontmatter, content) : content;
         }
         const res = await writeTextAtomic(cfg.VAULT_ROOT, rel, finalText, { createParents: true });
+        try { qmdUpdate(); } catch { /* qmd unavailable — index will be stale until next vault_rag_index */ }
         const commit = await maybeAutocommit(cfg, commit_message ?? `vault_write: ${rel}`);
         return ok({ path: res.relPath, bytes: res.bytes, ...commit });
       } catch (err) {
@@ -520,79 +521,16 @@ Returns:
     "vault_rag_index",
     {
       title: "Index vault for semantic search",
-      description: "Reads all markdown files and indexes them using embeddings (prefers GEMINI_API_KEY, falls back to OPENAI_API_KEY).",
+      description: "Runs qmd update (BM25) then qmd embed (vector) to fully index the vault. Uses local GGUF models via qmd — no API key required.",
       inputSchema: {},
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async () => {
-      const apiKey = cfg.GEMINI_API_KEY || cfg.OPENAI_API_KEY;
-      if (!apiKey) return fail(new Error("Neither GEMINI_API_KEY nor OPENAI_API_KEY is set in config."));
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
-        const root = cfg.VAULT_ROOT;
-        const entries = await listDir(root, WIKI_DIR, { depth: 10, includeDirs: false });
-        const index = await loadIndex(root);
-        
-        let indexed = 0;
-        const toIndex: { path: string; text: string }[] = [];
-
-        // Identify files that need indexing
-        for (const entry of entries) {
-          if (!entry.path.endsWith('.md')) continue;
-          try {
-            const text = await readText(root, entry.path);
-            if (text.length > 20000) continue; 
-            
-            const existing = index.chunks.find(c => c.path === entry.path && c.text === text);
-            if (existing) continue;
-
-            toIndex.push({ path: entry.path, text });
-          } catch {
-             // skip unreadable
-          }
-        }
-
-        if (toIndex.length > 0) {
-          // Process in batches. Gemini supports up to 100, but we use 50 for free tier
-          // to stay under RPM (Requests Per Minute) limits as suggested.
-          const batchSize = cfg.GEMINI_FREE_TIER ? 50 : 100;
-          
-          for (let i = 0; i < toIndex.length; i += batchSize) {
-            const batch = toIndex.slice(i, i + batchSize);
-            
-            // Remove old entries for these paths
-            const batchPaths = new Set(batch.map(b => b.path));
-            index.chunks = index.chunks.filter(c => !batchPaths.has(c.path));
-
-            if (cfg.GEMINI_API_KEY) {
-              const embeddings = await batchEmbedContentsWithRetry(batch.map(b => b.text), apiKey, cfg.GEMINI_MODEL);
-              batch.forEach((item, idx) => {
-                index.chunks.push({ path: item.path, text: item.text, embedding: embeddings[idx]! });
-              });
-
-              // Even with retries, we add a small delay between successful batches on free tier
-              if (cfg.GEMINI_FREE_TIER && i + batchSize < toIndex.length) {
-                await new Promise(r => setTimeout(r, 1000));
-              }
-            } else {
-              // OpenAI fallback (sequential for simplicity as this request is focused on Gemini)
-              for (const item of batch) {
-                const embedding = await generateEmbeddingWithRetry(item.text, apiKey);
-                index.chunks.push({ path: item.path, text: item.text, embedding });
-              }
-            }
-            indexed += batch.length;
-          }
-        }
-        
-        await saveIndex(root, index);
-        return ok({ 
-          status: "success", 
-          indexed, 
-          totalChunks: index.chunks.length, 
-          provider: cfg.GEMINI_API_KEY ? "gemini" : "openai",
-          freeTier: cfg.GEMINI_API_KEY ? cfg.GEMINI_FREE_TIER : false
-        });
+        qmdUpdate();
+        qmdEmbed();
+        return ok({ status: "success", provider: "qmd" });
       } catch (err) {
         return fail(err);
       }
@@ -604,7 +542,7 @@ Returns:
     "vault_rag_search",
     {
       title: "Semantic search (RAG)",
-      description: "Search the vault using semantic embeddings (prefers GEMINI_API_KEY).",
+      description: "Search the vault using qmd hybrid search (BM25 + vector + reranking). Uses local GGUF models — no API key required.",
       inputSchema: {
         query: z.string().min(1),
         limit: z.number().int().min(1).max(20).default(5),
@@ -612,19 +550,13 @@ Returns:
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ query, limit }) => {
-      const apiKey = cfg.GEMINI_API_KEY || cfg.OPENAI_API_KEY;
-      if (!apiKey) return fail(new Error("No API key configured for embeddings."));
       try {
-        if (cfg.GEMINI_API_KEY && cfg.GEMINI_FREE_TIER) {
-          // Small safety delay for free tier to prevent rapid sequential hits
-          await new Promise(r => setTimeout(r, 500));
-        }
-
-        const queryEmbedding = await generateEmbeddingWithRetry(query, apiKey, cfg.GEMINI_MODEL);
-
-        const index = await loadIndex(cfg.VAULT_ROOT);
-        const results = await searchIndex(index, queryEmbedding, limit);
-        return ok({ count: results.length, results: results.map(r => ({ path: r.path, score: r.score })), provider: cfg.GEMINI_API_KEY ? "gemini" : "openai" });
+        const results = qmdQuery(query, limit);
+        return ok({
+          count: results.length,
+          results: results.map(r => ({ path: r.displayPath, score: r.score, snippet: r.snippet, title: r.title })),
+          provider: "qmd",
+        });
       } catch (err) {
         return fail(err);
       }

@@ -27,6 +27,8 @@ services:
       DEFAULT_RESPONSE_FORMAT: ${DEFAULT_RESPONSE_FORMAT:-markdown}
     volumes:
       - ${VAULT_PATH}:/vault
+      - qmd-config:/home/app/.config/qmd   # collection + context definitions
+      - qmd-models:/home/app/.cache/qmd    # ~2GB GGUF models — survives image updates
     # Do NOT publish ports to the host. cloudflared reaches us over the
     # internal docker network.
     expose:
@@ -48,3 +50,7 @@ services:
 networks:
   mcpnet:
     driver: bridge
+
+volumes:
+  qmd-config:   # qmd collection + context config (~trivial size)
+  qmd-models:   # qmd GGUF model cache (~2GB, expensive to re-download)
