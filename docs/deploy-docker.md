@@ -47,3 +47,13 @@ sudo chown -R 10001:10001 /path/to/your/vault
 ## Git Support
 
 For `wiki_git_status` and `VAULT_AUTOCOMMIT` to work, the mounted vault directory must be a git repository (`git init`). The container uses the local `git` binary to perform operations. Ensure you have configured a `user.name` and `user.email` within the vault's git config if you encounter commit errors.
+
+### Remote sync (`wiki_sync` / `wiki_pull`)
+
+Pushing and pulling require a configured remote and credentials reachable from inside the container. For SSH remotes, mount your key (e.g. into `/home/docker/obsidian-ssh`) and make sure it is owned by the container user — if push/pull fails on permissions, re-apply:
+
+```bash
+sudo chown -R 10001:10001 /home/docker/obsidian-ssh
+```
+
+`wiki_pull` defaults to a fast-forward-only pull so it never creates a merge commit unattended; divergence and rebase conflicts are returned as data for you to resolve, never auto-resolved.

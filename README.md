@@ -6,8 +6,10 @@ Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.
 
 ## What it does
 
-- **Vault primitives** — read, write, list, search, move, soft-delete files in the vault, with path-traversal safety and atomic writes safe for Obsidian Sync.
-- **Wiki bookkeeping tools** — scaffold a fresh vault, rebuild the master index, append to the log, find unprocessed raw sources, scan for lint issues, return backlink graphs, show recent git diffs.
+- **Vault primitives** — read, write, list, search, move, soft-delete files in the vault, with path-traversal safety and atomic writes safe for Obsidian Sync. Moving a note rewrites inbound `[[wikilinks]]` so links never dangle.
+- **Wiki bookkeeping tools** — scaffold a fresh vault, rebuild the master index, append to the log, find unprocessed raw sources, return backlink graphs, enumerate tags, list templates, and report vault statistics.
+- **Wiki maintenance** — a read-only lint scan (broken / ambiguous links, orphans, missing frontmatter) paired with an apply tool that auto-fixes the mechanical subset, plus note-merging that relinks references to the survivor.
+- **Git round-trip** — the vault is a git repo; push (`wiki_sync`), pull (`wiki_pull`, fast-forward-only by default with conflicts surfaced as data), status, per-file history, and time-windowed diffs.
 - **Semantic search** — hybrid BM25 + vector search via [qmd](https://github.com/tobilu/qmd), running local GGUF models. No API key, no rate limits, no data leaving the server.
 - **Wiki workflow prompts** — `wiki_init`, `wiki_ingest`, `wiki_query`, `wiki_lint`. These return the playbook text from the upstream SKILL.md files so any MCP-capable LLM client can execute the LLM-Wiki workflows using the tools above.
 - **Remote access** — streamable HTTP transport, fronted by Cloudflare Tunnel + Cloudflare Access (OAuth). The vault machine opens no inbound ports.
@@ -73,9 +75,13 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `vault_list` | Directory listing with depth + glob filter |
 | `vault_search` | Full-text search (ripgrep with Node fallback) |
 | `vault_search_frontmatter` | Query in-memory frontmatter index by field |
-| `vault_move` | Rename / relocate within the vault |
+| `vault_move` | Rename / relocate within the vault; rewrites inbound `[[wikilinks]]` (opt out with `relink:false`) |
 | `vault_delete` | Soft-delete to `.trash/` |
 | `vault_frontmatter_update` | Merge frontmatter on one or many files |
+| `vault_apply_template` | Instantiate a template file, substituting `{{variables}}` |
+| `vault_canvas_read` | Read and parse an Obsidian `.canvas` (JSON) file |
+| `vault_canvas_write` | Write a valid Obsidian `.canvas` JSON structure |
+| `vault_stats` | Dashboard: note/word counts, link density, orphan ratio, growth over a window |
 | `vault_rag_index` | Full re-index: starts a background `qmd update` (BM25) then `qmd embed` (vectors) job |
 | `vault_rag_status` | Read the current qmd indexing job status |
 | `vault_rag_search` | Hybrid semantic search (BM25 + vector + reranking) via local qmd |
@@ -83,12 +89,20 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `wiki_index_rebuild` | Rebuild `wiki/index.md` from filesystem state |
 | `wiki_log_append` | Append a dated entry to `wiki/log.md` |
 | `wiki_link_graph` | Return backlinks + outlinks for a page (neighborhood) |
-| `wiki_lint_scan` | Read-only health scan: broken links, orphans, index drift, missing pages |
+| `wiki_lint_scan` | Read-only health scan: broken links, ambiguous links, orphans, missing frontmatter |
+| `wiki_lint_fix` | Auto-fix the mechanical subset of the lint scan (frontmatter / index / links); `dry_run` by default |
+| `wiki_validate_frontmatter` | Check a directory for files missing required frontmatter fields |
+| `wiki_tags` | Enumerate all tags (frontmatter + inline `#tags`) with counts and pages |
+| `wiki_template_list` | List templates under `templates/` with the `{{variables}}` each expects |
+| `wiki_merge_notes` | Merge one note into another and relink inbound references to the survivor |
 | `wiki_unprocessed_sources` | List files in `raw/` that haven't been ingested yet |
-| `wiki_diff` | Recent vault changes over a time window (git-backed) |
 | `wiki_capture` | Quick-capture a snippet into `raw/inbox/` |
 | `wiki_attach_url` | Fetch a URL and save as a raw source |
 | `wiki_git_status` | Report vault git status (branch, dirty, ahead/behind) |
+| `wiki_diff` | Recent vault changes over a time window (git-backed) |
+| `wiki_file_history` | Per-file commit history (`git log --follow`); optionally show contents at a SHA |
+| `wiki_sync` | Push local vault commits to the remote |
+| `wiki_pull` | Pull from the remote (fast-forward-only by default; conflicts returned as data) |
 
 ## Prompts exposed
 
