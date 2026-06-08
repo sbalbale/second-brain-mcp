@@ -1,4 +1,5 @@
 import { z } from "zod";
+import path from "node:path";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Config } from "../config.js";
 import {
@@ -11,8 +12,8 @@ import {
 } from "../vault/fs.js";
 import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontmatter.js";
 import { searchText } from "../vault/search.js";
-import { scanWikiPages } from "../vault/links.js";
-import { gitCommitAll } from "../vault/git.js";
+import { scanWikiPages, buildLinkResolver, buildBacklinksByPath, rewriteWikilinks } from "../vault/links.js";
+import { maybeAutocommit as gitMaybeAutocommit, gitLog } from "../vault/git.js";
 import { qmdQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
@@ -45,13 +46,11 @@ function isPathError(err: unknown): err is PathSafetyError {
   return err instanceof Error && err.name === "PathSafetyError";
 }
 
-async function maybeAutocommit(
+function maybeAutocommit(
   cfg: Config,
   message: string,
 ): Promise<{ committed: boolean; sha: string | null }> {
-  if (!cfg.VAULT_AUTOCOMMIT) return { committed: false, sha: null };
-  const res = await gitCommitAll(cfg.VAULT_ROOT, message);
-  return { committed: res.committed, sha: res.sha };
+  return gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message);
 }
 
 export function registerVaultTools(server: McpServer, cfg: Config): void {
@@ -325,27 +324,86 @@ Returns:
       title: "Move / rename a vault file or directory",
       description: `Rename or relocate a file or directory inside the vault. Both source and destination must resolve inside VAULT_ROOT.
 
+When 'relink' is true (default) and a single '.md' file is moved, inbound [[wikilinks]] across the vault are rewritten to point at the new location, preserving each link's style (#anchor and |alias kept; path-form links stay path-form, bare links stay bare). Bare basename links are only rewritten when the old basename was globally unique — otherwise they are left untouched, since Obsidian resolves ambiguous bare links by shortest-unique-path and rewriting could retarget the wrong note.
+
 Args:
   - from (string): vault-relative source.
   - to (string): vault-relative destination.
   - create_parents (boolean): default true.
   - overwrite (boolean): default false.
+  - relink (boolean): default true. Rewrite inbound wikilinks after a single-file .md move.
 
 Returns:
-  { "from", "to", "committed", "sha" }`,
+  { "from", "to", "relinked_files", "relink_count", "committed", "sha" }`,
       inputSchema: {
         from: VaultPath,
         to: VaultPath,
         create_parents: z.boolean().default(true),
         overwrite: z.boolean().default(false),
+        relink: z.boolean().default(true),
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ from, to, create_parents, overwrite }) => {
+    async ({ from, to, create_parents, overwrite, relink }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
+        const doRelink = relink && /\.md$/i.test(from);
+
+        // Capture old-basename/title uniqueness BEFORE the move, while the old page still exists.
+        let oldBasenameUnique = false;
+        let oldTitle: string | undefined;
+        let oldTitleUnique = false;
+        if (doRelink) {
+          const { pages } = await scanWikiPages(cfg.VAULT_ROOT);
+          const oldSlug = path.basename(from, ".md").toLowerCase();
+          oldBasenameUnique = pages.filter((p) => p.slug.toLowerCase() === oldSlug).length <= 1;
+          const moved = pages.find((p) => p.relPath.toLowerCase() === from.toLowerCase());
+          oldTitle = moved?.title;
+          if (oldTitle) {
+            const tl = oldTitle.toLowerCase();
+            oldTitleUnique = pages.filter((p) => p.title.toLowerCase() === tl).length <= 1;
+          }
+        }
+
         const res = await moveInside(cfg.VAULT_ROOT, from, to, { createParents: create_parents, overwrite });
+
+        const relinkedFiles: string[] = [];
+        let relinkCount = 0;
+        if (doRelink) {
+          const oldSlug = path.basename(from, ".md");
+          const newSlug = path.basename(to, ".md");
+          const oldPathNoExt = from.replace(/\.md$/i, "");
+          const newPathNoExt = to.replace(/\.md$/i, "");
+          const replacer = (target: string): string | null => {
+            const tl = target.trim().toLowerCase();
+            if (tl === from.toLowerCase()) return to;                 // path-with-.md
+            if (tl === oldPathNoExt.toLowerCase()) return newPathNoExt; // path-without-.md
+            if (oldBasenameUnique && tl === oldSlug.toLowerCase()) return newSlug; // bare slug
+            if (oldTitleUnique && oldTitle && tl === oldTitle.toLowerCase()) return newSlug; // bare title
+            return null;
+          };
+
+          // Cheap candidate set: any .md file mentioning the old basename. rewriteWikilinks
+          // matches targets exactly, so prose/prefix false-positives are written-back as no-ops.
+          const matches = await searchText(cfg.VAULT_ROOT, oldSlug, { regex: false, caseSensitive: false, globs: ["*.md"], maxResults: 500 });
+          const candidatePaths = [...new Set(matches.map((m) => m.path))];
+          for (const cp of candidatePaths) {
+            try {
+              const text = await readText(cfg.VAULT_ROOT, cp);
+              const { body: nextText, count } = rewriteWikilinks(text, replacer);
+              if (count > 0) {
+                await writeTextAtomic(cfg.VAULT_ROOT, cp, nextText, { createParents: false });
+                relinkedFiles.push(cp);
+                relinkCount += count;
+              }
+            } catch {
+              // skip unreadable / racing files
+            }
+          }
+        }
+
         const commit = await maybeAutocommit(cfg, `vault_move: ${from} -> ${to}`);
-        return ok({ ...res, ...commit });
+        return ok({ ...res, relinked_files: relinkedFiles, relink_count: relinkCount, ...commit });
       } catch (err) {
         return fail(err);
       }
@@ -584,6 +642,68 @@ Returns:
           count: results.length,
           results: results.map(r => ({ path: r.displayPath, score: r.score, snippet: r.snippet, title: r.title })),
           provider: "qmd",
+        });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- vault_stats --------------------------------------------------------
+  server.registerTool(
+    "vault_stats",
+    {
+      title: "Vault statistics dashboard",
+      description: `Aggregate stats over the wiki: note count, total word count, outlink count, link density (outlinks/note), and orphan count/ratio. Orphans are non-root pages with no resolved inbound links (index.md and log.md are excluded by construction). Also reports growth over a recent window from git history.
+
+Note: word count reads every note body and is the slowest part of this tool.
+
+Args:
+  - window_seconds (integer): growth window. Default 604800 (7 days). 0 = all history.
+
+Returns:
+  { "noteCount", "wordCount", "totalOutlinks", "linkDensity", "orphanCount", "orphanRatio", "orphans", "window": { "seconds", "commits", "filesTouched" } }`,
+      inputSchema: {
+        window_seconds: z.number().int().min(0).default(604800),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ window_seconds }) => {
+      try {
+        const index = await scanWikiPages(cfg.VAULT_ROOT);
+        const resolver = buildLinkResolver(index.pages);
+        const backlinks = buildBacklinksByPath(index.pages, resolver);
+
+        const noteCount = index.pages.length;
+        const totalOutlinks = index.pages.reduce((n, p) => n + p.outlinks.length, 0);
+        const orphans = index.pages
+          .filter((p) => (backlinks.get(p.relPath) ?? []).length === 0)
+          .map((p) => p.relPath);
+
+        let wordCount = 0;
+        for (const p of index.pages) {
+          try {
+            const { body } = parseMarkdown(await readText(cfg.VAULT_ROOT, p.relPath));
+            wordCount += body.split(/\s+/).filter(Boolean).length;
+          } catch {
+            // skip unreadable files
+          }
+        }
+
+        const commits = await gitLog(cfg.VAULT_ROOT, window_seconds, 1000);
+        const filesTouched = new Set<string>();
+        for (const c of commits) for (const f of c.files) filesTouched.add(f);
+
+        const round2 = (n: number) => Math.round(n * 100) / 100;
+        return ok({
+          noteCount,
+          wordCount,
+          totalOutlinks,
+          linkDensity: noteCount ? round2(totalOutlinks / noteCount) : 0,
+          orphanCount: orphans.length,
+          orphanRatio: noteCount ? round2(orphans.length / noteCount) : 0,
+          orphans: orphans.slice(0, 50),
+          window: { seconds: window_seconds, commits: commits.length, filesTouched: filesTouched.size },
         });
       } catch (err) {
         return fail(err);

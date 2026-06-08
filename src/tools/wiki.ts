@@ -13,10 +13,33 @@ import {
   INDEX_FILE,
   LOG_FILE,
 } from "../constants.js";
-import { listDir, writeTextAtomic, exists, readText } from "../vault/fs.js";
-import { buildMarkdown, parseMarkdown } from "../vault/frontmatter.js";
-import { scanWikiPages } from "../vault/links.js";
-import { gitStatus, gitLog, gitPush } from "../vault/git.js";
+import { listDir, writeTextAtomic, exists, readText, softDelete } from "../vault/fs.js";
+import { searchText } from "../vault/search.js";
+import { buildMarkdown, parseMarkdown, mergeFrontmatter, mergeFrontmatterIntoWins } from "../vault/frontmatter.js";
+import { scanWikiPages, buildLinkResolver, buildBacklinksByPath, rewriteWikilinks } from "../vault/links.js";
+import {
+  scanLint,
+  resolveBrokenLink,
+  extractInlineTags,
+  extractTemplateVars,
+  formatIndexBody,
+  categoryToType,
+} from "../vault/maintenance.js";
+import {
+  gitStatus,
+  gitLog,
+  gitPush,
+  gitUpstream,
+  gitFetch,
+  gitDirtyFiles,
+  gitAheadBehind,
+  gitHeadSha,
+  gitChangedBetween,
+  gitPull,
+  gitFileHistory,
+  gitShowFile,
+  maybeAutocommit as gitMaybeAutocommit,
+} from "../vault/git.js";
 
 function ok(structured: unknown, text?: string) {
   const textContent = text ?? JSON.stringify(structured, null, 2);
@@ -31,6 +54,10 @@ function fail(err: unknown) {
     isError: true as const,
     content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
   };
+}
+
+function maybeAutocommit(cfg: Config, message: string) {
+  return gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message);
 }
 
 export function registerWikiTools(server: McpServer, cfg: Config): void {
@@ -88,6 +115,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       inputSchema: {},
     },
     async () => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
         const entries = await listDir(root, WIKI_DIR, { depth: 5, includeDirs: false });
@@ -109,23 +137,9 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
           }
         }
 
-        pages.sort((a, b) => a.path.localeCompare(b.path));
-
-        let body = "# Wiki Index\n\n";
-        const types = [...new Set(pages.map(p => p.type))].sort();
-
-        for (const t of types) {
-          body += `## ${t.charAt(0).toUpperCase() + t.slice(1)}\n`;
-          const filtered = pages.filter(p => p.type === t);
-          for (const p of filtered) {
-            body += `- [[${p.path}|${p.title}]]\n`;
-          }
-          body += "\n";
-        }
-
         const indexContent = buildMarkdown(
           { type: "index", title: "Wiki Index", updated: new Date().toISOString(), count: pages.length },
-          body
+          formatIndexBody(pages)
         );
 
         await writeTextAtomic(root, INDEX_FILE, indexContent);
@@ -208,35 +222,26 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
     "wiki_lint_scan",
     {
       title: "Scan wiki for health issues",
-      description: "Identifies broken links, orphan pages, and missing pages.",
-      inputSchema: {},
+      description: `Identifies orphan pages, broken links, ambiguous links (a bare target matching more than one note), and pages missing required frontmatter. Read-only — see wiki_lint_fix to apply the mechanical subset.
+
+Args:
+  - required_fields (string[]): frontmatter keys every page must have. Default ["type","title"].
+
+Returns:
+  { "issueCount", "byType": { ... }, "issues": [structured LintIssue, ...] }`,
+      inputSchema: {
+        required_fields: z.array(z.string()).default(["type", "title"]),
+      },
     },
-    async () => {
+    async ({ required_fields }) => {
       try {
         const index = await scanWikiPages(cfg.VAULT_ROOT);
-        const issues: { type: string, page: string, detail: string }[] = [];
-
-        const validTitles = new Set(index.pages.map((p: any) => p.title.toLowerCase()));
-        const validSlugs = new Set(index.pages.map((p: any) => p.slug.toLowerCase()));
-        const validPaths = new Set(index.pages.map((p: any) => p.relPath.toLowerCase()));
-
-        for (const p of index.pages) {
-          // Check for orphans
-          const bls = index.backlinks.get(p.title.toLowerCase()) ?? [];
-          if (bls.length === 0) {
-            issues.push({ type: "orphan", page: p.relPath, detail: "No pages link to this page." });
-          }
-
-          // Check outlinks
-          for (const target of p.outlinks) {
-            const tLower = target.toLowerCase();
-            if (!validTitles.has(tLower) && !validSlugs.has(tLower) && !validPaths.has(tLower) && !target.startsWith("http")) {
-              issues.push({ type: "broken-link", page: p.relPath, detail: `Links to "${target}" which does not exist.` });
-            }
-          }
-        }
-
-        return ok({ issueCount: issues.length, issues });
+        const resolver = buildLinkResolver(index.pages);
+        const backlinks = buildBacklinksByPath(index.pages, resolver);
+        const issues = scanLint(index.pages, resolver, backlinks, required_fields);
+        const byType: Record<string, number> = {};
+        for (const i of issues) byType[i.type] = (byType[i.type] ?? 0) + 1;
+        return ok({ issueCount: issues.length, byType, issues });
       } catch (err) {
         return fail(err);
       }
@@ -426,11 +431,449 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
           }
         }
         
-        return ok({ 
+        return ok({
           status: invalidFiles.length === 0 ? "success" : "failed",
           scanned: entries.length,
           invalidCount: invalidFiles.length,
-          invalidFiles 
+          invalidFiles
+        });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_pull ----------------------------------------------------------
+  server.registerTool(
+    "wiki_pull",
+    {
+      title: "Pull vault from remote",
+      description: `Pull remote commits into the local vault. Defaults to a fast-forward-only pull so the tool never invents a merge commit unattended; conflicts are reported as data, never auto-resolved.
+
+Notes:
+  - allow_dirty does NOT force anything: 'git pull --ff-only' still refuses when an incoming change overlaps a locally-modified tracked file. It only succeeds when the dirty set and the incoming changeset are disjoint.
+  - The dirty check is a point-in-time gate with an inherent race (Obsidian Sync can write between the check and the pull). --ff-only is the real safety mechanism: it refuses anything needing a true merge, so the worst case is a clean failure, never a corrupt merge.
+  - Pull over SSH uses the same key path as push; if it fails on permissions, re-apply the container key fix (chown -R 10001:10001 /home/docker/obsidian-ssh).
+
+Args:
+  - strategy ('ff-only' | 'rebase'): default 'ff-only'.
+  - allow_dirty (boolean): default false. Skip the dirty-tree refusal (see note above).
+
+Returns (on success): { pulled: true, files_changed, ahead, behind, sha }
+Returns (no-op/refusal): { pulled: false, reason, dirty_files? | conflicts? | ahead, behind }`,
+      inputSchema: {
+        strategy: z.enum(["ff-only", "rebase"]).default("ff-only"),
+        allow_dirty: z.boolean().default(false),
+      },
+    },
+    async ({ strategy, allow_dirty }) => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        const root = cfg.VAULT_ROOT;
+        const status = await gitStatus(root);
+        if (!status.isRepo) return fail(new Error("Vault is not a git repository."));
+
+        if (!(await gitUpstream(root))) {
+          return ok({ pulled: false, reason: "no upstream" });
+        }
+
+        if (status.dirty && !allow_dirty) {
+          return ok({ pulled: false, reason: "dirty", dirty_files: await gitDirtyFiles(root) });
+        }
+
+        const fetched = await gitFetch(root);
+        if (!fetched.success) return fail(new Error(`git fetch failed: ${fetched.stderr}`));
+
+        const { ahead, behind } = await gitAheadBehind(root);
+        if (behind === 0) return ok({ pulled: false, reason: "up to date", ahead, behind });
+
+        const before = await gitHeadSha(root);
+        const result = await gitPull(root, strategy);
+        if (!result.success) {
+          if (result.reason === "conflict") {
+            return ok({ pulled: false, reason: "conflict", conflicts: result.conflicts ?? [] });
+          }
+          return ok({ pulled: false, reason: result.reason ?? "failed", detail: result.stderr });
+        }
+
+        const after = await gitHeadSha(root);
+        const files_changed = before && after ? await gitChangedBetween(root, before, after) : [];
+        return ok({ pulled: true, files_changed, ahead, behind, sha: after });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_lint_fix ------------------------------------------------------
+  server.registerTool(
+    "wiki_lint_fix",
+    {
+      title: "Auto-fix mechanical wiki lint issues",
+      description: `Apply the mechanical subset of wiki_lint_scan: scaffold missing frontmatter (title/type), regenerate a drifted index, and normalize unambiguous broken links (format/punctuation variants of a real note). Orphans and ambiguous links are NEVER touched. All fixes for a file are applied in a single write, with one commit at the end.
+
+Args:
+  - dry_run (boolean): default true. Preview changes without writing.
+  - fixes (string[]): subset of ["frontmatter","index","links"]. Default all three.
+  - required_fields (string[]): frontmatter keys to scaffold. Default ["type","title"] (only title/type can be scaffolded mechanically; others are reported, not invented).
+
+Returns:
+  { dry_run, counts: { frontmatter, links, index }, changes: [{ file, class, before?, after? }] }`,
+      inputSchema: {
+        dry_run: z.boolean().default(true),
+        fixes: z.array(z.enum(["frontmatter", "index", "links"])).default(["frontmatter", "index", "links"]),
+        required_fields: z.array(z.string()).default(["type", "title"]),
+      },
+    },
+    async ({ dry_run, fixes, required_fields }) => {
+      if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        const root = cfg.VAULT_ROOT;
+        const index = await scanWikiPages(root);
+        const resolver = buildLinkResolver(index.pages);
+        const backlinks = buildBacklinksByPath(index.pages, resolver);
+        const issues = scanLint(index.pages, resolver, backlinks, required_fields);
+
+        const changes: { file: string; class: string; before?: unknown; after?: unknown }[] = [];
+        const counts = { frontmatter: 0, links: 0, index: 0 };
+        let wrote = false;
+
+        // Group frontmatter + link fixes per file and apply in a single read/modify/write.
+        const pageByPath = new Map(index.pages.map((p) => [p.relPath, p]));
+        const fmByFile = new Map<string, Record<string, unknown>>();
+        const linksByFile = new Map<string, Map<string, string>>();
+
+        if (fixes.includes("frontmatter")) {
+          for (const issue of issues) {
+            if (issue.type !== "missing-frontmatter") continue;
+            const page = pageByPath.get(issue.page);
+            if (!page) continue;
+            const updates: Record<string, unknown> = {};
+            for (const f of issue.missing) {
+              if (f === "title") updates.title = page.title;
+              else if (f === "type") updates.type = categoryToType(page.category);
+              // other required fields cannot be mechanically scaffolded — leave for human.
+            }
+            if (Object.keys(updates).length > 0) fmByFile.set(issue.page, updates);
+          }
+        }
+
+        if (fixes.includes("links")) {
+          for (const issue of issues) {
+            if (issue.type !== "broken-link") continue;
+            const canonical = resolveBrokenLink(issue.target, resolver);
+            if (!canonical) continue;
+            const m = linksByFile.get(issue.page) ?? new Map<string, string>();
+            m.set(issue.target.trim().toLowerCase(), canonical);
+            linksByFile.set(issue.page, m);
+          }
+        }
+
+        const touchedFiles = new Set<string>([...fmByFile.keys(), ...linksByFile.keys()]);
+        for (const file of touchedFiles) {
+          try {
+            const original = await readText(root, file);
+            let text = original;
+            const updates = fmByFile.get(file);
+            if (updates) {
+              text = mergeFrontmatter(text, updates);
+              counts.frontmatter++;
+              changes.push({ file, class: "frontmatter", after: updates });
+            }
+            const linkMap = linksByFile.get(file);
+            if (linkMap) {
+              const { body, count } = rewriteWikilinks(text, (t) => linkMap.get(t.trim().toLowerCase()) ?? null);
+              if (count > 0) {
+                text = body;
+                counts.links += count;
+                changes.push({ file, class: "links", after: Object.fromEntries(linkMap) });
+              }
+            }
+            if (text !== original && !dry_run) {
+              await writeTextAtomic(root, file, text, { createParents: false });
+              wrote = true;
+            }
+          } catch {
+            // skip unreadable / racing files
+          }
+        }
+
+        // Index drift: compare generated body (ignoring the timestamp frontmatter) against current.
+        if (fixes.includes("index")) {
+          const entries = await listDir(root, WIKI_DIR, { depth: 5, includeDirs: false });
+          const idxPages: { path: string; title: string; type: string }[] = [];
+          for (const entry of entries) {
+            if (entry.path === INDEX_FILE || !entry.path.endsWith(".md")) continue;
+            try {
+              const { frontmatter } = parseMarkdown(await readText(root, entry.path));
+              idxPages.push({
+                path: entry.path,
+                title: (frontmatter.title as string) ?? path.basename(entry.path, ".md"),
+                type: (frontmatter.type as string) ?? "unknown",
+              });
+            } catch {
+              // skip
+            }
+          }
+          const newBody = formatIndexBody(idxPages);
+          let currentBody = "";
+          if (await exists(root, INDEX_FILE)) {
+            currentBody = parseMarkdown(await readText(root, INDEX_FILE)).body;
+          }
+          if (newBody.trim() !== currentBody.trim()) {
+            counts.index++;
+            changes.push({ file: INDEX_FILE, class: "index" });
+            if (!dry_run) {
+              const content = buildMarkdown(
+                { type: "index", title: "Wiki Index", updated: new Date().toISOString(), count: idxPages.length },
+                newBody,
+              );
+              await writeTextAtomic(root, INDEX_FILE, content);
+              wrote = true;
+            }
+          }
+        }
+
+        let commit: { committed: boolean; sha: string | null } = { committed: false, sha: null };
+        if (wrote) {
+          const total = counts.frontmatter + counts.links + counts.index;
+          commit = await maybeAutocommit(cfg, `wiki_lint_fix: ${total} fix(es)`);
+        }
+        return ok({ dry_run, counts, changes, ...commit });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_file_history --------------------------------------------------
+  server.registerTool(
+    "wiki_file_history",
+    {
+      title: "Per-file git history",
+      description: `Show a single note's commit history (git log --follow), so renames are tracked. Optionally return the file's contents at a specific commit.
+
+Args:
+  - path (string): vault-relative path to the note.
+  - limit (integer 1-200): max commits. Default 50.
+  - sha (string, optional): if given, also return the file's contents at that commit.
+
+Returns:
+  { path, count, commits: [{ sha, date, subject }], contents_at_sha? }`,
+      inputSchema: {
+        path: z.string().min(1),
+        limit: z.number().int().min(1).max(200).default(50),
+        sha: z.string().optional(),
+      },
+    },
+    async ({ path: rel, limit, sha }) => {
+      try {
+        const commits = await gitFileHistory(cfg.VAULT_ROOT, rel, limit);
+        const out: Record<string, unknown> = { path: rel, count: commits.length, commits };
+        if (sha) out.contents_at_sha = await gitShowFile(cfg.VAULT_ROOT, sha, rel);
+        return ok(out);
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_tags ----------------------------------------------------------
+  server.registerTool(
+    "wiki_tags",
+    {
+      title: "Enumerate tags",
+      description: `List all tags (frontmatter 'tags:' plus inline #tags) with their counts and the pages carrying each. Useful for spotting concept drift and near-duplicate tags.
+
+Args:
+  - path (string): subtree to scan. Default "wiki".
+
+Returns:
+  { tagCount, tags: [{ tag, count, pages: [...] }] } sorted by count descending.`,
+      inputSchema: {
+        path: z.string().default("wiki"),
+      },
+    },
+    async ({ path: rel }) => {
+      try {
+        const root = cfg.VAULT_ROOT;
+        const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
+        const agg = new Map<string, Set<string>>();
+        const addTag = (raw: string, page: string) => {
+          const tag = raw.replace(/^#/, "").trim();
+          if (!tag) return;
+          const set = agg.get(tag) ?? new Set<string>();
+          set.add(page);
+          agg.set(tag, set);
+        };
+        for (const entry of entries) {
+          if (!entry.path.endsWith(".md")) continue;
+          try {
+            const text = await readText(root, entry.path);
+            const { frontmatter, body } = parseMarkdown(text);
+            const fmTags = frontmatter.tags;
+            if (Array.isArray(fmTags)) for (const t of fmTags) addTag(String(t), entry.path);
+            else if (typeof fmTags === "string") for (const t of fmTags.split(/[,\s]+/)) addTag(t, entry.path);
+            for (const t of extractInlineTags(body)) addTag(t, entry.path);
+          } catch {
+            // skip unreadable files
+          }
+        }
+        const tags = [...agg.entries()]
+          .map(([tag, pages]) => ({ tag, count: pages.size, pages: [...pages].sort() }))
+          .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+        return ok({ tagCount: tags.length, tags });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_template_list -------------------------------------------------
+  server.registerTool(
+    "wiki_template_list",
+    {
+      title: "List templates",
+      description: `List markdown templates under templates/ at the vault root, with the {{variables}} each expects. Companion to vault_apply_template. Returns an empty list (not an error) if templates/ does not exist.
+
+Returns:
+  { count, templates: [{ path, name, variables: [...] }] }`,
+      inputSchema: {},
+    },
+    async () => {
+      try {
+        const root = cfg.VAULT_ROOT;
+        const dir = "templates";
+        if (!(await exists(root, dir))) return ok({ count: 0, templates: [] });
+        const entries = await listDir(root, dir, { depth: 5, includeDirs: false });
+        const templates: { path: string; name: string; variables: string[] }[] = [];
+        for (const entry of entries) {
+          if (!entry.path.endsWith(".md")) continue;
+          try {
+            const content = await readText(root, entry.path);
+            templates.push({
+              path: entry.path,
+              name: path.basename(entry.path, ".md"),
+              variables: extractTemplateVars(content),
+            });
+          } catch {
+            // skip unreadable files
+          }
+        }
+        return ok({ count: templates.length, templates });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_merge_notes ---------------------------------------------------
+  server.registerTool(
+    "wiki_merge_notes",
+    {
+      title: "Merge two notes",
+      description: `Combine 'from' into 'into': append from's body, union from's array frontmatter (into wins for scalars like title/created/type), relink inbound [[from]] references to the survivor, and soft-delete the source. Bare basename/title links are only rewritten when from's basename/title was globally unique (see vault_move).
+
+Args:
+  - from (string): note to merge away (the source).
+  - into (string): surviving note.
+  - separator (string): inserted between the two bodies. Default "\\n\\n---\\n\\n".
+  - delete_source (boolean): soft-delete 'from' after merging. Default true.
+  - relink (boolean): rewrite inbound [[from]] links to 'into'. Default true.
+  - dry_run (boolean): preview without writing. Default false.
+
+Refuses delete_source && !relink (would orphan every inbound link).
+
+Returns:
+  { from, into, dry_run, relinked_files, relink_count, deleted_source, committed, sha }`,
+      inputSchema: {
+        from: z.string().min(1),
+        into: z.string().min(1),
+        separator: z.string().default("\n\n---\n\n"),
+        delete_source: z.boolean().default(true),
+        relink: z.boolean().default(true),
+        dry_run: z.boolean().default(false),
+      },
+    },
+    async ({ from, into, separator, delete_source, relink, dry_run }) => {
+      if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      if (from === into) return fail(new Error("'from' and 'into' must differ."));
+      if (delete_source && !relink) return fail(new Error("Refusing delete_source with relink=false: every inbound [[from]] link would break. Set relink=true or delete_source=false."));
+      try {
+        const root = cfg.VAULT_ROOT;
+        const fromParsed = parseMarkdown(await readText(root, from));
+        const intoText = await readText(root, into);
+        const intoParsed = parseMarkdown(intoText);
+
+        // Survivor body: into body + separator + from body. Frontmatter: into scalars win, arrays union.
+        const mergedBody = intoParsed.body.trimEnd() + separator + fromParsed.body.trimStart();
+        const mergedFm = parseMarkdown(mergeFrontmatterIntoWins(intoText, fromParsed.frontmatter)).frontmatter;
+        let mergedFile = buildMarkdown(mergedFm, mergedBody);
+
+        // Build a style-preserving, uniqueness-gated replacer for inbound [[from]] links.
+        const { pages } = await scanWikiPages(root);
+        const fromSlug = path.basename(from, ".md");
+        const intoSlug = path.basename(into, ".md");
+        const fromPathNoExt = from.replace(/\.md$/i, "");
+        const intoPathNoExt = into.replace(/\.md$/i, "");
+        const fromSlugUnique = pages.filter((p) => p.slug.toLowerCase() === fromSlug.toLowerCase()).length <= 1;
+        const fromPage = pages.find((p) => p.relPath.toLowerCase() === from.toLowerCase());
+        const fromTitle = fromPage?.title;
+        const fromTitleUnique = fromTitle
+          ? pages.filter((p) => p.title.toLowerCase() === fromTitle.toLowerCase()).length <= 1
+          : false;
+        const replacer = (target: string): string | null => {
+          const tl = target.trim().toLowerCase();
+          if (tl === from.toLowerCase()) return into;
+          if (tl === fromPathNoExt.toLowerCase()) return intoPathNoExt;
+          if (fromSlugUnique && tl === fromSlug.toLowerCase()) return intoSlug;
+          if (fromTitleUnique && fromTitle && tl === fromTitle.toLowerCase()) return intoSlug;
+          return null;
+        };
+
+        const relinkedFiles: string[] = [];
+        let relinkCount = 0;
+        if (relink) {
+          // Fix any [[from]] references that live inside the survivor's own (merged) content.
+          mergedFile = rewriteWikilinks(mergedFile, replacer).body;
+
+          const matches = await searchText(root, fromSlug, { regex: false, caseSensitive: false, globs: ["*.md"], maxResults: 500 });
+          const candidatePaths = [...new Set(matches.map((m) => m.path))].filter((p) => p !== from && p !== into);
+          for (const cp of candidatePaths) {
+            try {
+              const text = await readText(root, cp);
+              const { body, count } = rewriteWikilinks(text, replacer);
+              if (count > 0) {
+                if (!dry_run) await writeTextAtomic(root, cp, body, { createParents: false });
+                relinkedFiles.push(cp);
+                relinkCount += count;
+              }
+            } catch {
+              // skip unreadable / racing files
+            }
+          }
+        }
+
+        let deletedSource = false;
+        if (!dry_run) {
+          await writeTextAtomic(root, into, mergedFile, { createParents: false });
+          if (delete_source) {
+            await softDelete(root, from);
+            deletedSource = true;
+          }
+        }
+
+        let commit: { committed: boolean; sha: string | null } = { committed: false, sha: null };
+        if (!dry_run) commit = await maybeAutocommit(cfg, `wiki_merge_notes: ${from} -> ${into}`);
+
+        return ok({
+          from,
+          into,
+          dry_run,
+          relinked_files: relinkedFiles,
+          relink_count: relinkCount,
+          deleted_source: deletedSource,
+          ...commit,
         });
       } catch (err) {
         return fail(err);
