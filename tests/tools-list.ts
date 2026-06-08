@@ -41,9 +41,11 @@ async function testToolsList() {
   console.log("  - wiki_lint_fix");
   console.log("  - wiki_file_history");
   console.log("  - wiki_tags");
+  console.log("  - wiki_tag_rename");
   console.log("  - wiki_template_list");
   console.log("  - wiki_merge_notes");
   console.log("  - vault_stats");
+  console.log("  - vault_restore");
   
   console.log("\nTest passed - server initialized with tools.");
   process.exit(0);

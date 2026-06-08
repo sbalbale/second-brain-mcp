@@ -6,6 +6,7 @@ import {
   extractTemplateVars,
   formatIndexBody,
   categoryToType,
+  renameTagsInFile,
 } from '../src/vault/maintenance.js';
 import { buildLinkResolver, buildBacklinksByPath, type PageInfo } from '../src/vault/links.js';
 import { mergeFrontmatterIntoWins, parseMarkdown } from '../src/vault/frontmatter.js';
@@ -82,6 +83,46 @@ describe('mergeFrontmatterIntoWins', () => {
     expect(frontmatter.tags).toEqual(['a', 'b', 'c']); // arrays unioned
     expect(frontmatter.type).toBe('note');      // source-only key taken
     expect(body.trim()).toBe('body');           // body untouched
+  });
+});
+
+describe('renameTagsInFile', () => {
+  test('renames frontmatter array tags (deduped) and inline tags, respecting boundaries', () => {
+    const text = [
+      '---',
+      'tags:',
+      '  - ml',
+      '  - other',
+      '---',
+      'About #ml and #mlops and #ml/sub here.',
+    ].join('\n');
+    const { text: out, count } = renameTagsInFile(text, new Map([['ml', 'machine-learning']]));
+    const { frontmatter } = parseMarkdown(out);
+    expect(frontmatter.tags).toEqual(['machine-learning', 'other']); // fm tag renamed
+    expect(out).toContain('#machine-learning and #mlops and #ml/sub'); // only bare #ml renamed
+    expect(count).toBe(2); // 1 frontmatter + 1 inline
+  });
+
+  test('merges multiple tags into one and dedups in frontmatter', () => {
+    const text = '---\ntags: [a, b, keep]\n---\nbody #a #b';
+    const { text: out, count } = renameTagsInFile(text, new Map([['a', 'z'], ['b', 'z']]));
+    const { frontmatter } = parseMarkdown(out);
+    expect(frontmatter.tags).toEqual(['z', 'keep']); // a,b -> z, deduped
+    expect(out).toContain('body #z #z');
+    expect(count).toBe(4); // 2 frontmatter + 2 inline
+  });
+
+  test('handles files without frontmatter (inline only)', () => {
+    const { text, count } = renameTagsInFile('plain #old text', new Map([['old', 'new']]));
+    expect(text).toBe('plain #new text');
+    expect(count).toBe(1);
+  });
+
+  test('no-op returns original text and zero count', () => {
+    const original = '---\ntags: [x]\n---\nno tags here';
+    const { text, count } = renameTagsInFile(original, new Map([['absent', 'z']]));
+    expect(count).toBe(0);
+    expect(text).toBe(original);
   });
 });
 

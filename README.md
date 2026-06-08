@@ -6,8 +6,8 @@ Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.
 
 ## What it does
 
-- **Vault primitives** — read, write, list, search, move, soft-delete files in the vault, with path-traversal safety and atomic writes safe for Obsidian Sync. Moving a note rewrites inbound `[[wikilinks]]` so links never dangle.
-- **Wiki bookkeeping tools** — scaffold a fresh vault, rebuild the master index, append to the log, find unprocessed raw sources, return backlink graphs, enumerate tags, list templates, and report vault statistics.
+- **Vault primitives** — read, write, list, search, move, soft-delete and restore files in the vault, with path-traversal safety and atomic writes safe for Obsidian Sync. Moving a note rewrites inbound `[[wikilinks]]` so links never dangle.
+- **Wiki bookkeeping tools** — scaffold a fresh vault, rebuild the master index, append to the log, find unprocessed raw sources, return backlink graphs, enumerate and rename/merge tags, list templates, and report vault statistics.
 - **Wiki maintenance** — a read-only lint scan (broken / ambiguous links, orphans, missing frontmatter) paired with an apply tool that auto-fixes the mechanical subset, plus note-merging that relinks references to the survivor.
 - **Git round-trip** — the vault is a git repo; push (`wiki_sync`), pull (`wiki_pull`, fast-forward-only by default with conflicts surfaced as data), status, per-file history, and time-windowed diffs.
 - **Semantic search** — hybrid BM25 + vector search via [qmd](https://github.com/tobilu/qmd), running local GGUF models. No API key, no rate limits, no data leaving the server.
@@ -77,6 +77,7 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `vault_search_frontmatter` | Query in-memory frontmatter index by field |
 | `vault_move` | Rename / relocate within the vault; rewrites inbound `[[wikilinks]]` (opt out with `relink:false`) |
 | `vault_delete` | Soft-delete to `.trash/` |
+| `vault_restore` | List soft-deleted entries, or restore one from `.trash/` to its original path |
 | `vault_frontmatter_update` | Merge frontmatter on one or many files |
 | `vault_apply_template` | Instantiate a template file, substituting `{{variables}}` |
 | `vault_canvas_read` | Read and parse an Obsidian `.canvas` (JSON) file |
@@ -93,6 +94,7 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 | `wiki_lint_fix` | Auto-fix the mechanical subset of the lint scan (frontmatter / index / links); `dry_run` by default |
 | `wiki_validate_frontmatter` | Check a directory for files missing required frontmatter fields |
 | `wiki_tags` | Enumerate all tags (frontmatter + inline `#tags`) with counts and pages |
+| `wiki_tag_rename` | Rename a tag or merge several into one, across frontmatter and inline `#tags` |
 | `wiki_template_list` | List templates under `templates/` with the `{{variables}}` each expects |
 | `wiki_merge_notes` | Merge one note into another and relink inbound references to the survivor |
 | `wiki_unprocessed_sources` | List files in `raw/` that haven't been ingested yet |

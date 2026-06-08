@@ -6,8 +6,10 @@ import {
   exists,
   globToRegExp,
   listDir,
+  listTrash,
   moveInside,
   readText,
+  restoreFromTrash,
   softDelete,
   writeTextAtomic,
 } from '../src/vault/fs.js';
@@ -55,6 +57,39 @@ describe('vault fs helpers', () => {
     expect(deleted.trashPath).toMatch(/^\.trash\/archive\/b\.md\./);
     expect(await exists(root, 'archive/b.md')).toBe(false);
     expect(await readText(root, deleted.trashPath)).toBe('hello');
+  });
+
+  test('softDelete -> listTrash -> restoreFromTrash round-trips a file', async () => {
+    await writeTextAtomic(root, 'wiki/concepts/foo.md', 'content', { createParents: true });
+    const deleted = await softDelete(root, 'wiki/concepts/foo.md');
+    expect(await exists(root, 'wiki/concepts/foo.md')).toBe(false);
+
+    const trash = await listTrash(root);
+    expect(trash).toHaveLength(1);
+    expect(trash[0]).toMatchObject({
+      trashPath: deleted.trashPath,
+      originalPath: 'wiki/concepts/foo.md',
+      type: 'file',
+    });
+    expect(trash[0]!.deletedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+    const restored = await restoreFromTrash(root, deleted.trashPath, {});
+    expect(restored.restoredPath).toBe('wiki/concepts/foo.md');
+    expect(await readText(root, 'wiki/concepts/foo.md')).toBe('content');
+    expect(await listTrash(root)).toHaveLength(0);
+  });
+
+  test('restoreFromTrash refuses to clobber unless overwrite, and rejects non-trash paths', async () => {
+    await writeTextAtomic(root, 'a.md', 'v1', { createParents: true });
+    const deleted = await softDelete(root, 'a.md');
+    await writeTextAtomic(root, 'a.md', 'v2-new', { createParents: true }); // original path reoccupied
+
+    await expect(restoreFromTrash(root, deleted.trashPath, {})).rejects.toThrow('already exists');
+    const restored = await restoreFromTrash(root, deleted.trashPath, { overwrite: true });
+    expect(restored.restoredPath).toBe('a.md');
+    expect(await readText(root, 'a.md')).toBe('v1');
+
+    await expect(restoreFromTrash(root, 'not/in/trash.md', {})).rejects.toThrow('Not a valid trash entry');
   });
 
   test('listDir honors depth, includeDirs, sorting, and default hidden-vault skips', async () => {
