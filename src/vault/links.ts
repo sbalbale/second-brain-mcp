@@ -13,6 +13,7 @@ export interface PageInfo {
   slug: string; // filename stem
   category: "sources" | "entities" | "concepts" | "synthesis" | "other";
   outlinks: string[]; // wikilink targets as written
+  frontmatter: Record<string, unknown>; // parsed YAML frontmatter
 }
 
 export interface WikiIndex {
@@ -84,8 +85,97 @@ async function collect(
       slug,
       category,
       outlinks,
+      frontmatter: parsed.frontmatter,
     });
   }
+}
+
+/**
+ * Capturing variant of the wikilink pattern: group 1 = target, group 2 = "#anchor"
+ * (with leading #), group 3 = "|alias" (with leading |). Used for rewriting.
+ */
+const WIKILINK_CAPTURE_RE = /\[\[([^\[\]|#]+)(#[^\[\]|]+)?(\|[^\[\]]+)?\]\]/g;
+
+/** Strip a wikilink target down to its bare form: no #anchor, no |alias, trimmed. */
+function bareTarget(raw: string): string {
+  return raw.split("#")[0]!.split("|")[0]!.trim();
+}
+
+export interface LinkResolver {
+  /**
+   * Resolve a raw wikilink target (any of title / slug / path-with-.md /
+   * path-without-.md, case-insensitive) to a page. `candidates` preserves
+   * ambiguity: multiple pages sharing a basename do not silently collapse.
+   */
+  resolve(rawTarget: string): { page: PageInfo | null; ambiguous: boolean; candidates: PageInfo[] };
+}
+
+/**
+ * Build an ambiguity-preserving resolver over the four link forms. Each page is
+ * registered under its lowercased title, slug, relPath, and relPath-without-.md.
+ */
+export function buildLinkResolver(pages: PageInfo[]): LinkResolver {
+  const index = new Map<string, PageInfo[]>();
+  const add = (key: string, page: PageInfo) => {
+    const k = key.toLowerCase();
+    if (!k) return;
+    const arr = index.get(k) ?? [];
+    if (!arr.includes(page)) arr.push(page);
+    index.set(k, arr);
+  };
+  for (const p of pages) {
+    add(p.title, p);
+    add(p.slug, p);
+    add(p.relPath, p);
+    add(p.relPath.replace(/\.md$/i, ""), p);
+  }
+  return {
+    resolve(rawTarget: string) {
+      const key = bareTarget(rawTarget).toLowerCase();
+      const candidates = index.get(key) ?? [];
+      if (candidates.length === 1) return { page: candidates[0]!, ambiguous: false, candidates };
+      if (candidates.length > 1) return { page: null, ambiguous: true, candidates };
+      return { page: null, ambiguous: false, candidates: [] };
+    },
+  };
+}
+
+/**
+ * Backlinks keyed by the *resolved* page relPath (not raw link text), so a page
+ * linked by title in one place and by slug in another is counted once. Ambiguous
+ * and unresolvable links are ignored (they are not real backlinks to any one page).
+ */
+export function buildBacklinksByPath(pages: PageInfo[], resolver: LinkResolver): Map<string, string[]> {
+  const backlinks = new Map<string, string[]>();
+  for (const p of pages) {
+    for (const target of p.outlinks) {
+      const { page } = resolver.resolve(target);
+      if (!page) continue;
+      const arr = backlinks.get(page.relPath) ?? [];
+      if (!arr.includes(p.relPath)) arr.push(p.relPath);
+      backlinks.set(page.relPath, arr);
+    }
+  }
+  return backlinks;
+}
+
+/**
+ * Rewrite wikilink targets via a per-link replacer, preserving #anchor and |alias
+ * verbatim. `replacer` receives the bare target; return a new target to rewrite, or
+ * null to leave the link untouched.
+ */
+export function rewriteWikilinks(
+  body: string,
+  replacer: (target: string) => string | null,
+): { body: string; count: number } {
+  let count = 0;
+  const next = body.replace(WIKILINK_CAPTURE_RE, (whole, target: string, anchor?: string, alias?: string) => {
+    const replacement = replacer(target.trim());
+    if (replacement == null) return whole;
+    count++;
+    return `[[${replacement}${anchor ?? ""}${alias ?? ""}]]`;
+  });
+  return { body: next, count };
 }
 
 export function extractWikilinks(body: string): string[] {

@@ -108,6 +108,133 @@ export async function gitPush(cwd: string): Promise<{ success: boolean; stdout: 
   return { success: res.code === 0, stdout: res.stdout, stderr: res.stderr };
 }
 
+/** Name of the upstream tracking branch (e.g. "origin/main"), or null if none is set. */
+export async function gitUpstream(cwd: string): Promise<string | null> {
+  const res = await run("git", ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], cwd);
+  return res.code === 0 ? res.stdout.trim() : null;
+}
+
+export async function gitFetch(cwd: string, remote = "origin"): Promise<{ success: boolean; stderr: string }> {
+  const res = await run("git", ["fetch", remote], cwd);
+  return { success: res.code === 0, stderr: res.stderr };
+}
+
+/** Vault-relative paths of dirty (untracked / modified / staged) files. */
+export async function gitDirtyFiles(cwd: string): Promise<string[]> {
+  if (!(await isGitRepo(cwd))) return [];
+  const res = await run("git", ["status", "--porcelain=v1"], cwd);
+  const out: string[] = [];
+  for (const line of res.stdout.split(/\r?\n/)) {
+    if (!line) continue;
+    let p = line.slice(3); // strip 2-char XY status + space
+    if (p.includes(" -> ")) p = p.split(" -> ").pop()!; // renames: take destination
+    out.push(p.trim());
+  }
+  return out;
+}
+
+/**
+ * Commits ahead of / behind the upstream. Caller must confirm an upstream exists
+ * (gitUpstream) first. `rev-list --left-right --count HEAD...@{u}` prints
+ * "<ahead>\t<behind>": left side = commits only on HEAD (ahead), right side =
+ * commits only on upstream (behind).
+ */
+export async function gitAheadBehind(cwd: string): Promise<{ ahead: number; behind: number }> {
+  const res = await run("git", ["rev-list", "--left-right", "--count", "HEAD...@{u}"], cwd);
+  if (res.code !== 0) return { ahead: 0, behind: 0 };
+  const [a, b] = res.stdout.trim().split(/\s+/);
+  return { ahead: parseInt(a ?? "0", 10) || 0, behind: parseInt(b ?? "0", 10) || 0 };
+}
+
+export async function gitHeadSha(cwd: string): Promise<string | null> {
+  const res = await run("git", ["rev-parse", "HEAD"], cwd);
+  return res.code === 0 ? res.stdout.trim() : null;
+}
+
+export async function gitChangedBetween(cwd: string, a: string, b: string): Promise<string[]> {
+  const res = await run("git", ["diff", "--name-only", `${a}..${b}`], cwd);
+  if (res.code !== 0) return [];
+  return res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+export interface PullResult {
+  success: boolean;                       // pull completed and HEAD advanced
+  reason?: "not-a-repo" | "diverged" | "conflict";
+  conflicts?: string[];
+  stderr: string;
+}
+
+/**
+ * Pull from upstream. Failure handling is split by strategy:
+ *  - ff-only: a failed fast-forward creates no merge/rebase state and no unmerged
+ *    paths — there is nothing to abort. Report reason:"diverged".
+ *  - rebase: capture unmerged paths *before* aborting (diff --diff-filter=U is empty
+ *    after --abort), then abort only if mid-rebase (conflicts present). Never auto-resolves.
+ */
+export async function gitPull(cwd: string, strategy: "ff-only" | "rebase"): Promise<PullResult> {
+  if (!(await isGitRepo(cwd))) return { success: false, reason: "not-a-repo", stderr: "not a git repo" };
+  const args = strategy === "rebase" ? ["pull", "--rebase"] : ["pull", "--ff-only"];
+  const res = await run("git", args, cwd);
+  if (res.code === 0) return { success: true, stderr: res.stderr };
+
+  if (strategy === "rebase") {
+    const conflicts = await unmergedPaths(cwd);
+    if (conflicts.length > 0) {
+      await run("git", ["rebase", "--abort"], cwd); // gated: only when mid-rebase with conflicts
+    }
+    return { success: false, reason: "conflict", conflicts, stderr: res.stderr };
+  }
+  // ff-only failure: local and remote both advanced; fast-forward impossible.
+  return { success: false, reason: "diverged", stderr: res.stderr };
+}
+
+async function unmergedPaths(cwd: string): Promise<string[]> {
+  const res = await run("git", ["diff", "--name-only", "--diff-filter=U"], cwd);
+  if (res.code !== 0) return [];
+  return res.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+}
+
+/** Per-file commit history (`git log --follow`). */
+export async function gitFileHistory(
+  cwd: string,
+  relPath: string,
+  limit = 50,
+): Promise<{ sha: string; date: string; subject: string }[]> {
+  if (!(await isGitRepo(cwd))) return [];
+  const res = await run(
+    "git",
+    ["log", "--follow", "--date=iso-strict", "--pretty=format:%H%x09%ad%x09%s", "-n", String(limit), "--", relPath],
+    cwd,
+  );
+  if (res.code !== 0) return [];
+  const out: { sha: string; date: string; subject: string }[] = [];
+  for (const line of res.stdout.split(/\r?\n/)) {
+    if (!line) continue;
+    const [sha, date, ...rest] = line.split("\t");
+    if (!sha) continue;
+    out.push({ sha, date: date ?? "", subject: rest.join("\t") });
+  }
+  return out;
+}
+
+/** Contents of a file at a given commit (`git show <sha>:<path>`). */
+export async function gitShowFile(cwd: string, sha: string, relPath: string): Promise<string> {
+  const res = await run("git", ["show", `${sha}:${relPath}`], cwd);
+  if (res.code !== 0) throw new Error(res.stderr || `git show failed for ${sha}:${relPath}`);
+  return res.stdout;
+}
+
+/** Commit all changes when autocommit is enabled; no-op otherwise. */
+export async function maybeAutocommit(
+  autocommit: boolean,
+  root: string,
+  message: string,
+): Promise<{ committed: boolean; sha: string | null }> {
+  if (!autocommit) return { committed: false, sha: null };
+  const res = await gitCommitAll(root, message);
+  return { committed: res.committed, sha: res.sha };
+}
+
 interface RunResult { code: number; stdout: string; stderr: string }
 
 function run(cmd: string, args: string[], cwd: string): Promise<RunResult> {
