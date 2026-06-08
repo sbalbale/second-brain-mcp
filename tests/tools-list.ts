@@ -36,7 +36,14 @@ async function testToolsList() {
   console.log("  - wiki_capture");
   console.log("  - wiki_attach_url");
   console.log("  - wiki_sync");
+  console.log("  - wiki_pull");
   console.log("  - wiki_validate_frontmatter");
+  console.log("  - wiki_lint_fix");
+  console.log("  - wiki_file_history");
+  console.log("  - wiki_tags");
+  console.log("  - wiki_template_list");
+  console.log("  - wiki_merge_notes");
+  console.log("  - vault_stats");
   
   console.log("\nTest passed - server initialized with tools.");
   process.exit(0);

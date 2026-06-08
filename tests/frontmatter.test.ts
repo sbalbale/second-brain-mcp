@@ -10,11 +10,50 @@ describe('Frontmatter handling', () => {
     expect(parsed.body).toBe('# Body\ntext here.');
   });
 
+  test('parseMarkdown handles files without frontmatter', () => {
+    const parsed = parseMarkdown('# Body\ntext here.');
+    expect(parsed.hasFrontmatter).toBe(false);
+    expect(parsed.frontmatter).toEqual({});
+    expect(parsed.body).toBe('# Body\ntext here.');
+  });
+
   test('mergeFrontmatter appends arrays uniquely', () => {
     const existing = '---\ntags: [a, b]\n---\n# Body';
     const merged = mergeFrontmatter(existing, { tags: ['b', 'c'] });
     const parsed = parseMarkdown(merged);
     expect(parsed.frontmatter.tags).toEqual(['a', 'b', 'c']);
+  });
+
+  test('mergeFrontmatter can replace arrays', () => {
+    const existing = '---\ntags: [a, b]\n---\n# Body';
+    const merged = mergeFrontmatter(existing, { tags: ['c'] }, { arrayStrategy: 'replace' });
+    const parsed = parseMarkdown(merged);
+    expect(parsed.frontmatter.tags).toEqual(['c']);
+  });
+
+  test('mergeFrontmatter dedupes object arrays by value', () => {
+    const existing = [
+      '---',
+      'items:',
+      '  - id: 1',
+      '    label: one',
+      '  - id: 2',
+      '    label: two',
+      '---',
+      '# Body',
+    ].join('\n');
+    const merged = mergeFrontmatter(existing, {
+      items: [
+        { id: 2, label: 'two' },
+        { id: 3, label: 'three' },
+      ],
+    });
+    const parsed = parseMarkdown(merged);
+    expect(parsed.frontmatter.items).toEqual([
+      { id: 1, label: 'one' },
+      { id: 2, label: 'two' },
+      { id: 3, label: 'three' },
+    ]);
   });
 
   test('buildMarkdown creates a valid file', () => {
