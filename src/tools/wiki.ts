@@ -24,6 +24,7 @@ import {
   extractTemplateVars,
   formatIndexBody,
   categoryToType,
+  renameTagsInFile,
 } from "../vault/maintenance.js";
 import {
   gitStatus,
@@ -723,6 +724,71 @@ Returns:
           .map(([tag, pages]) => ({ tag, count: pages.size, pages: [...pages].sort() }))
           .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
         return ok({ tagCount: tags.length, tags });
+      } catch (err) {
+        return fail(err);
+      }
+    }
+  );
+
+  // ---- wiki_tag_rename ----------------------------------------------------
+  server.registerTool(
+    "wiki_tag_rename",
+    {
+      title: "Rename or merge tags",
+      description: `Rename a tag (or merge several tags into one) across the vault, rewriting both frontmatter 'tags:' and inline #tags. Pass one 'from' tag to rename, or several to merge them all into 'to'. Inline matches respect tag boundaries (renaming "ml" never touches "#mlops"). Pairs with wiki_tags for cleaning up near-duplicate tags. Leading '#' on inputs is optional and ignored.
+
+Args:
+  - from (string[]): one or more source tags. Multiple = merge into 'to'.
+  - to (string): destination tag.
+  - path (string): subtree to scan. Default "wiki".
+  - dry_run (boolean): default true. Preview without writing.
+
+Returns:
+  { dry_run, from, to, total, files_changed: [{ path, count }] }`,
+      inputSchema: {
+        from: z.array(z.string().min(1)).min(1),
+        to: z.string().min(1),
+        path: z.string().default("wiki"),
+        dry_run: z.boolean().default(true),
+      },
+    },
+    async ({ from, to, path: rel, dry_run }) => {
+      if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+      try {
+        const root = cfg.VAULT_ROOT;
+        const dest = to.replace(/^#/, "").trim();
+        const mapping = new Map<string, string>();
+        for (const f of from) {
+          const src = f.replace(/^#/, "").trim();
+          if (src && src !== dest) mapping.set(src, dest);
+        }
+        if (mapping.size === 0) return fail(new Error("No tags to rename (after dropping identity/empty mappings)."));
+
+        const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
+        const filesChanged: { path: string; count: number }[] = [];
+        let total = 0;
+        let wrote = false;
+        for (const entry of entries) {
+          if (!entry.path.endsWith(".md")) continue;
+          try {
+            const original = await readText(root, entry.path);
+            const { text, count } = renameTagsInFile(original, mapping);
+            if (count > 0) {
+              filesChanged.push({ path: entry.path, count });
+              total += count;
+              if (!dry_run) {
+                await writeTextAtomic(root, entry.path, text, { createParents: false });
+                wrote = true;
+              }
+            }
+          } catch {
+            // skip unreadable files
+          }
+        }
+
+        let commit: { committed: boolean; sha: string | null } = { committed: false, sha: null };
+        if (wrote) commit = await maybeAutocommit(cfg, `wiki_tag_rename: ${[...mapping.keys()].join(",")} -> ${dest}`);
+        return ok({ dry_run, from: [...mapping.keys()], to: dest, total, files_changed: filesChanged, ...commit });
       } catch (err) {
         return fail(err);
       }

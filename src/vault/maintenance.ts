@@ -1,5 +1,10 @@
 import type { PageInfo, LinkResolver } from "./links.js";
 import { slugify } from "./paths.js";
+import { parseMarkdown, buildMarkdown } from "./frontmatter.js";
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /**
  * Structured lint findings. `wiki_lint_scan` formats these for humans and
@@ -96,6 +101,55 @@ export function extractInlineTags(body: string): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Rename tags throughout a single file: frontmatter `tags:` (array or whitespace/comma
+ * string) and inline #tags in the body. `mapping` keys/values are bare tags (no leading
+ * #). Inline matches honor tag boundaries (renaming "ml" never touches "#mlops" or
+ * "#ml/sub"). Frontmatter tags are deduped after rename. Returns the rewritten file text
+ * and the number of replacements. Identity mappings (from === to) should be omitted by
+ * the caller.
+ */
+export function renameTagsInFile(text: string, mapping: Map<string, string>): { text: string; count: number } {
+  if (mapping.size === 0) return { text, count: 0 };
+  const parsed = parseMarkdown(text);
+  let count = 0;
+
+  // Frontmatter tags.
+  const fm: Record<string, unknown> = { ...parsed.frontmatter };
+  const renameList = (tags: string[]): string[] => {
+    const seen = new Set<string>();
+    const next: string[] = [];
+    for (const raw of tags) {
+      const renamed = mapping.get(raw) ?? raw;
+      if (renamed !== raw) count++;
+      if (!seen.has(renamed)) {
+        seen.add(renamed);
+        next.push(renamed);
+      }
+    }
+    return next;
+  };
+  if (Array.isArray(fm.tags)) {
+    fm.tags = renameList(fm.tags.map((t) => String(t)));
+  } else if (typeof fm.tags === "string") {
+    fm.tags = renameList(fm.tags.split(/[,\s]+/).filter(Boolean)).join(" ");
+  }
+
+  // Inline body tags.
+  let body = parsed.body;
+  for (const [from, to] of mapping) {
+    const re = new RegExp(`(^|[\\s(])#${escapeRegExp(from)}(?![\\w/\\-])`, "g");
+    body = body.replace(re, (_m, pre: string) => {
+      count++;
+      return `${pre}#${to}`;
+    });
+  }
+
+  if (count === 0) return { text, count: 0 };
+  const outText = parsed.hasFrontmatter ? buildMarkdown(fm, body) : body;
+  return { text: outText, count };
 }
 
 /** Extract unique {{variable}} names from template content. */

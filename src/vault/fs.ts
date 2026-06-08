@@ -100,6 +100,83 @@ export async function softDelete(
   return { originalPath: toVaultRel(vaultRoot, abs), trashPath: toVaultRel(vaultRoot, trashAbs) };
 }
 
+/** Timestamp suffix appended by softDelete (ISO with ':' and '.' replaced by '-'). */
+const TRASH_SUFFIX_RE = /\.(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z)$/;
+
+export interface TrashEntry {
+  trashPath: string;    // vault-relative path inside .trash/
+  originalPath: string; // where it would be restored to
+  deletedAt: string;    // the raw timestamp stamp
+  type: "file" | "directory";
+}
+
+/**
+ * List soft-deleted entries under `.trash/`. Each restorable unit is a path whose
+ * final segment carries the softDelete timestamp suffix; its contents (for deleted
+ * directories) are not enumerated separately.
+ */
+export async function listTrash(vaultRoot: string): Promise<TrashEntry[]> {
+  const trashAbs = safeJoin(vaultRoot, TRASH_DIR);
+  const out: TrashEntry[] = [];
+
+  async function walk(dirAbs: string): Promise<void> {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.readdir(dirAbs, { withFileTypes: true });
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    for (const e of entries) {
+      const abs = path.join(dirAbs, e.name);
+      const m = e.name.match(TRASH_SUFFIX_RE);
+      if (m) {
+        const trashRel = toVaultRel(vaultRoot, abs);
+        out.push({
+          trashPath: trashRel,
+          originalPath: trashRel.replace(/^\.trash\//, "").replace(TRASH_SUFFIX_RE, ""),
+          deletedAt: m[1]!,
+          type: e.isDirectory() ? "directory" : "file",
+        });
+        continue; // a stamped entry is one unit — don't descend into it
+      }
+      if (e.isDirectory()) await walk(abs); // unstamped dir = path scaffolding
+    }
+  }
+
+  await walk(trashAbs);
+  out.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt)); // most-recent first
+  return out;
+}
+
+/**
+ * Restore a soft-deleted entry from `.trash/` back to its original path. Reverses
+ * softDelete. Refuses to clobber an existing file unless `overwrite` is set.
+ */
+export async function restoreFromTrash(
+  vaultRoot: string,
+  trashRelPath: string,
+  opts: { overwrite?: boolean } = {},
+): Promise<{ trashPath: string; restoredPath: string }> {
+  if (!trashRelPath.startsWith(`${TRASH_DIR}/`) || !TRASH_SUFFIX_RE.test(trashRelPath)) {
+    throw new Error(`Not a valid trash entry: ${trashRelPath}`);
+  }
+  const originalRel = trashRelPath.replace(/^\.trash\//, "").replace(TRASH_SUFFIX_RE, "");
+  const trashAbs = safeJoin(vaultRoot, trashRelPath);
+  const originalAbs = safeJoin(vaultRoot, originalRel);
+  if (!opts.overwrite) {
+    try {
+      await fs.stat(originalAbs);
+      throw new Error(`Destination already exists: ${originalRel} (pass overwrite=true to replace)`);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  await fs.mkdir(path.dirname(originalAbs), { recursive: true });
+  await fs.rename(trashAbs, originalAbs);
+  return { trashPath: toVaultRel(vaultRoot, trashAbs), restoredPath: toVaultRel(vaultRoot, originalAbs) };
+}
+
 /**
  * List a directory. Non-recursive by default; set depth > 0 to recurse.
  * `globFilter` is a simple glob on the POSIX relative path (supports * and ?).

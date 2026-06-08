@@ -5,8 +5,10 @@ import type { Config } from "../config.js";
 import {
   exists,
   listDir,
+  listTrash,
   moveInside,
   readText,
+  restoreFromTrash,
   softDelete,
   writeTextAtomic,
 } from "../vault/fs.js";
@@ -434,6 +436,41 @@ Returns:
       try {
         const res = await softDelete(cfg.VAULT_ROOT, rel);
         const commit = await maybeAutocommit(cfg, `vault_delete: ${rel} -> ${res.trashPath}`);
+        return ok({ ...res, ...commit });
+      } catch (err) {
+        return fail(err);
+      }
+    },
+  );
+
+  // ---- vault_restore ------------------------------------------------------
+  server.registerTool(
+    "vault_restore",
+    {
+      title: "List or restore soft-deleted files",
+      description: `The inverse of vault_delete. Call with no 'path' to list restorable entries in .trash/ (most-recent first). Call with a trash 'path' to move it back to its original location.
+
+Args:
+  - path (string, optional): a trash entry path (as returned by the list mode). Omit to list.
+  - overwrite (boolean): default false. Allow restoring over an existing file at the original path.
+
+Returns (list): { count, entries: [{ trashPath, originalPath, deletedAt, type }] }
+Returns (restore): { trashPath, restoredPath, committed, sha }`,
+      inputSchema: {
+        path: z.string().optional(),
+        overwrite: z.boolean().default(false),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    },
+    async ({ path: rel, overwrite }) => {
+      try {
+        if (!rel) {
+          const entries = await listTrash(cfg.VAULT_ROOT);
+          return ok({ count: entries.length, entries });
+        }
+        if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
+        const res = await restoreFromTrash(cfg.VAULT_ROOT, rel, { overwrite });
+        const commit = await maybeAutocommit(cfg, `vault_restore: ${res.trashPath} -> ${res.restoredPath}`);
         return ok({ ...res, ...commit });
       } catch (err) {
         return fail(err);
