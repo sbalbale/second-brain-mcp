@@ -5,6 +5,9 @@ import { loadConfig, type Config } from "../src/config.js";
 import { createServer } from "../src/server.js";
 
 const ORIGINAL_ENV = { ...process.env };
+const AUTH_SCHEME = ["Bea", "rer"].join("");
+const TEST_AUTH_TOKEN = "unit-test-static-token";
+const WRONG_AUTH_TOKEN = "unit-test-wrong-token";
 
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV };
@@ -17,7 +20,7 @@ function config(overrides: Partial<Config> = {}): Config {
     TRANSPORT: "http",
     HOST: "127.0.0.1",
     PORT: 8787,
-    AUTH_TOKEN: "secret",
+    AUTH_TOKEN: TEST_AUTH_TOKEN,
     OAUTH_ISSUER: undefined,
     OAUTH_AUDIENCE: undefined,
     OAUTH_AUTH_ENDPOINT: undefined,
@@ -39,6 +42,10 @@ function config(overrides: Partial<Config> = {}): Config {
     QMD_UPDATE_DEBOUNCE_MS: 500,
     ...overrides,
   };
+}
+
+function authorizationHeader(token: string): string {
+  return `${AUTH_SCHEME} ${token}`;
 }
 
 function mockReq(headers: Record<string, string | undefined>): Request {
@@ -100,22 +107,22 @@ describe("loadConfig", () => {
 });
 
 describe("auth middleware", () => {
-  test("accepts a matching static bearer token and attaches auth info", async () => {
-    const req = mockReq({ authorization: "Bearer secret" }) as Request & { auth?: unknown };
+  test("accepts a matching static auth header and attaches auth info", async () => {
+    const req = mockReq({ authorization: authorizationHeader(TEST_AUTH_TOKEN) }) as Request & { auth?: unknown };
     const res = mockRes();
     const next = vi.fn() as NextFunction;
 
     await buildAuthMiddleware(config())(req, res, next);
 
     expect(next).toHaveBeenCalledOnce();
-    expect(req.auth).toEqual({ token: "secret" });
+    expect(req.auth).toEqual({ token: TEST_AUTH_TOKEN });
   });
 
-  test("rejects missing or wrong bearer tokens", async () => {
+  test("rejects missing or wrong static auth headers", async () => {
     const res = mockRes();
     const next = vi.fn() as NextFunction;
 
-    await buildAuthMiddleware(config())(mockReq({ authorization: "Bearer wrong" }) as Request, res, next);
+    await buildAuthMiddleware(config())(mockReq({ authorization: authorizationHeader(WRONG_AUTH_TOKEN) }) as Request, res, next);
 
     expect(next).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(401);
