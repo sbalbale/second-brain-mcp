@@ -2,8 +2,11 @@ type VaultMutationListener = (vaultRoot: string, relPath: string) => void | Prom
 
 const mutationListeners = new Set<VaultMutationListener>();
 
-export function onVaultMutation(listener: VaultMutationListener): void {
+export function onVaultMutation(listener: VaultMutationListener): () => void {
   mutationListeners.add(listener);
+  return () => {
+    mutationListeners.delete(listener);
+  };
 }
 
 export async function notifyVaultMutation(vaultRoot: string, relPath: string): Promise<void> {

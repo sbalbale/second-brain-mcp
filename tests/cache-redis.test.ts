@@ -128,6 +128,38 @@ describe("AppCache Redis integration", () => {
     );
   });
 
+  test("keeps a newer local vault version when Redis returns stale data", async () => {
+    const cache = new AppCache(cfg());
+    let calls = 0;
+
+    await expect(cache.getOrSet("C:/vault", "scope", "key", async () => ++calls)).resolves.toBe(1);
+    await cache.invalidateVault("C:/vault");
+
+    const versionWrite = redisMock.state.clients
+      .flatMap((client) => client.set.mock.calls)
+      .find(([key]) => String(key).includes(":vault:"));
+    expect(versionWrite).toBeDefined();
+    const [versionKey] = versionWrite as [string, string];
+    redisMock.state.store.set(versionKey, "0");
+
+    await expect(cache.getOrSet("C:/vault", "scope", "key", async () => ++calls)).resolves.toBe(2);
+    expect(calls).toBe(2);
+  });
+
+  test("disconnects a stale Redis client before reconnecting", async () => {
+    const cache = new AppCache(cfg());
+
+    await expect(cache.getOrSet("C:/vault", "scope", "first", async () => "one")).resolves.toBe("one");
+    const firstClient = redisMock.state.client;
+    expect(firstClient).toBeDefined();
+    firstClient!.isReady = false;
+
+    await expect(cache.getOrSet("C:/vault", "scope", "second", async () => "two")).resolves.toBe("two");
+
+    expect(firstClient!.disconnect).toHaveBeenCalled();
+    expect(redisMock.createClient).toHaveBeenCalledTimes(2);
+  });
+
   test("falls back to memory when Redis connect fails", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     redisMock.state.failConnect = true;

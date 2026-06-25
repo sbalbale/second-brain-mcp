@@ -63,6 +63,11 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+function versionRank(version: string | undefined): number {
+  if (!version || version === "0") return 0;
+  return Number.parseInt(version.split("-")[0] ?? "0", 36) || 0;
+}
+
 export class AppCache {
   private readonly memory: MemoryCache;
   private readonly singleFlight = new SingleFlight();
@@ -70,7 +75,8 @@ export class AppCache {
   private redis: RedisLike | null = null;
   private connectPromise: Promise<RedisLike | null> | null = null;
   private redisDisabledUntil = 0;
-  private warnedRedisError = false;
+  private readonly redisWarningTimes = new Map<string, number>();
+  private localVersionCounter = 0;
 
   constructor(private readonly cfg: Config) {
     this.memory = new MemoryCache(cfg.CACHE_MAX_ENTRIES);
@@ -110,7 +116,7 @@ export class AppCache {
 
   async invalidateVault(vaultRoot: string): Promise<void> {
     const vaultHash = hash(vaultRoot);
-    const nextVersion = Date.now().toString(36);
+    const nextVersion = `${Date.now().toString(36)}-${++this.localVersionCounter}`;
     this.vaultVersions.set(vaultHash, nextVersion);
 
     const redis = await this.getRedis();
@@ -128,7 +134,8 @@ export class AppCache {
     if (redis) {
       try {
         const redisVersion = await redis.get(this.versionKey(vaultHash));
-        if (redisVersion) {
+        const memoryVersion = this.vaultVersions.get(vaultHash);
+        if (redisVersion && versionRank(redisVersion) > versionRank(memoryVersion)) {
           this.vaultVersions.set(vaultHash, redisVersion);
           return redisVersion;
         }
@@ -183,6 +190,12 @@ export class AppCache {
   }
 
   private async connectRedis(): Promise<RedisLike | null> {
+    const previous = this.redis;
+    this.redis = null;
+    if (previous && !previous.isReady) {
+      await previous.disconnect().catch(() => {});
+    }
+
     const client = createClient({ url: this.cfg.REDIS_URL }) as unknown as RedisLike;
     client.on("error", (err) => {
       this.warnRedis(`Redis cache connection error: ${err.message}`);
@@ -204,8 +217,10 @@ export class AppCache {
   }
 
   private warnRedis(message: string): void {
-    if (this.warnedRedisError) return;
-    this.warnedRedisError = true;
+    const now = Date.now();
+    const lastWarnedAt = this.redisWarningTimes.get(message) ?? 0;
+    if (now - lastWarnedAt < 60_000) return;
+    this.redisWarningTimes.set(message, now);
     console.error(`[Cache] ${message}`);
   }
 

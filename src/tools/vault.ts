@@ -726,6 +726,8 @@ Returns:
     },
     async ({ window_seconds }) => {
       try {
+        const statsTtlSeconds =
+          window_seconds > 0 ? Math.min(cfg.CACHE_TTL_SECONDS, 5) : cfg.CACHE_TTL_SECONDS;
         const out = await cached("vault_stats", { window_seconds }, async () => {
           const index = await scanWikiPages(cfg.VAULT_ROOT);
           const resolver = buildLinkResolver(index.pages);
@@ -762,7 +764,7 @@ Returns:
             orphans: orphans.slice(0, 50),
             window: { seconds: window_seconds, commits: commits.length, filesTouched: filesTouched.size },
           };
-        });
+        }, statsTtlSeconds);
         return ok(out);
       } catch (err) {
         return fail(err);

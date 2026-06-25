@@ -487,7 +487,7 @@ Returns (no-op/refusal): { pulled: false, reason, dirty_files? | conflicts? | ah
         allow_dirty: z.boolean().default(false),
       },
     },
-    async ({ strategy, allow_dirty }) => runtime.runWrite(async () => {
+    async ({ strategy, allow_dirty }) => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -505,25 +505,34 @@ Returns (no-op/refusal): { pulled: false, reason, dirty_files? | conflicts? | ah
         const fetched = await runtime.runGit(() => gitFetch(root));
         if (!fetched.success) return fail(new Error(`git fetch failed: ${fetched.stderr}`));
 
-        const { ahead, behind } = await runtime.runGit(() => gitAheadBehind(root));
-        if (behind === 0) return ok({ pulled: false, reason: "up to date", ahead, behind });
+        return await runtime.runWrite(async () => {
+          const freshStatus = await runtime.runGit(() => gitStatus(root));
+          if (!freshStatus.isRepo) return fail(new Error("Vault is not a git repository."));
 
-        const before = await runtime.runGit(() => gitHeadSha(root));
-        const result = await runtime.runGit(() => gitPull(root, strategy));
-        if (!result.success) {
-          if (result.reason === "conflict") {
-            return ok({ pulled: false, reason: "conflict", conflicts: result.conflicts ?? [] });
+          if (freshStatus.dirty && !allow_dirty) {
+            return ok({ pulled: false, reason: "dirty", dirty_files: await runtime.runGit(() => gitDirtyFiles(root)) });
           }
-          return ok({ pulled: false, reason: result.reason ?? "failed", detail: result.stderr });
-        }
 
-        const after = await runtime.runGit(() => gitHeadSha(root));
-        const files_changed = before && after ? await runtime.runGit(() => gitChangedBetween(root, before, after)) : [];
-        return ok({ pulled: true, files_changed, ahead, behind, sha: after });
+          const { ahead, behind } = await runtime.runGit(() => gitAheadBehind(root));
+          if (behind === 0) return ok({ pulled: false, reason: "up to date", ahead, behind });
+
+          const before = await runtime.runGit(() => gitHeadSha(root));
+          const result = await runtime.runGit(() => gitPull(root, strategy));
+          if (!result.success) {
+            if (result.reason === "conflict") {
+              return ok({ pulled: false, reason: "conflict", conflicts: result.conflicts ?? [] });
+            }
+            return ok({ pulled: false, reason: result.reason ?? "failed", detail: result.stderr });
+          }
+
+          const after = await runtime.runGit(() => gitHeadSha(root));
+          const files_changed = before && after ? await runtime.runGit(() => gitChangedBetween(root, before, after)) : [];
+          return ok({ pulled: true, files_changed, ahead, behind, sha: after });
+        });
       } catch (err) {
         return fail(err);
       }
-    })
+    }
   );
 
   // ---- wiki_lint_fix ------------------------------------------------------

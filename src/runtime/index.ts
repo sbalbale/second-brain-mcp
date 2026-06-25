@@ -12,7 +12,7 @@ export interface AppRuntime {
 }
 
 let runtime: AppRuntime | null = null;
-let listenerInstalled = false;
+let unsubscribeMutationListener: (() => void) | null = null;
 
 export function getRuntime(cfg: Config): AppRuntime {
   if (runtime) return runtime;
@@ -31,10 +31,8 @@ export function getRuntime(cfg: Config): AppRuntime {
     runRag: (task) => ragLimiter.run(task),
   };
 
-  if (!listenerInstalled) {
-    onVaultMutation((vaultRoot) => cache.invalidateVault(vaultRoot));
-    listenerInstalled = true;
-  }
+  unsubscribeMutationListener?.();
+  unsubscribeMutationListener = onVaultMutation((vaultRoot) => cache.invalidateVault(vaultRoot));
 
   return runtime;
 }

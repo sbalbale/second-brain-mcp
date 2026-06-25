@@ -157,17 +157,30 @@ describe("vault mutation events", () => {
     const seen: string[] = [];
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    onVaultMutation((root, rel) => {
+    const unsubscribeSeen = onVaultMutation((root, rel) => {
       seen.push(`${root}:${rel}`);
     });
-    onVaultMutation(() => {
+    const unsubscribeFailing = onVaultMutation(() => {
       throw new Error("listener failed");
     });
 
-    await notifyVaultMutation("C:/vault", "wiki/a.md");
-    expect(seen).toContain("C:/vault:wiki/a.md");
-    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Mutation listener failed"));
+    try {
+      await notifyVaultMutation("C:/vault", "wiki/a.md");
+      expect(seen).toContain("C:/vault:wiki/a.md");
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Mutation listener failed"));
 
-    errorSpy.mockRestore();
+      unsubscribeSeen();
+      unsubscribeFailing();
+      seen.length = 0;
+      errorSpy.mockClear();
+
+      await notifyVaultMutation("C:/vault", "wiki/b.md");
+      expect(seen).toEqual([]);
+      expect(errorSpy).not.toHaveBeenCalled();
+    } finally {
+      unsubscribeSeen();
+      unsubscribeFailing();
+      errorSpy.mockRestore();
+    }
   });
 });

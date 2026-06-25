@@ -66,7 +66,11 @@ function describeError(err: unknown): string {
 }
 
 async function writeStatus(vaultRoot: string, status: QmdIndexStatus): Promise<void> {
-  await writeTextAtomic(vaultRoot, RAG_INDEX_STATUS_FILE, JSON.stringify(status, null, 2), { createParents: true });
+  activeIndexJobs.set(vaultRoot, status);
+  await writeTextAtomic(vaultRoot, RAG_INDEX_STATUS_FILE, JSON.stringify(status, null, 2), {
+    createParents: true,
+    notifyMutation: false,
+  });
 }
 
 function runQmd(vaultRoot: string, args: string[]): Promise<void> {
@@ -151,7 +155,6 @@ export async function startQmdIndexing(vaultRoot: string): Promise<QmdIndexStatu
     updatedAt: startedAt,
   };
 
-  activeIndexJobs.set(vaultRoot, status);
   try {
     await writeStatus(vaultRoot, status);
   } catch (err) {

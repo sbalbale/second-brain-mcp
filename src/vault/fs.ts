@@ -40,7 +40,7 @@ export async function writeTextAtomic(
   vaultRoot: string,
   relPath: string,
   contents: string,
-  opts: { createParents?: boolean } = {},
+  opts: { createParents?: boolean; notifyMutation?: boolean } = {},
 ): Promise<{ absPath: string; relPath: string; bytes: number }> {
   const abs = safeJoin(vaultRoot, relPath);
   const dir = path.dirname(abs);
@@ -58,7 +58,9 @@ export async function writeTextAtomic(
   }
   await fs.rename(tmp, abs);
   const written = { absPath: abs, relPath: toVaultRel(vaultRoot, abs), bytes: buf.byteLength };
-  await notifyVaultMutation(vaultRoot, written.relPath);
+  if (opts.notifyMutation !== false) {
+    await notifyVaultMutation(vaultRoot, written.relPath);
+  }
   return written;
 }
 
