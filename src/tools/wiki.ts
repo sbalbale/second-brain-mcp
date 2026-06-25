@@ -41,6 +41,7 @@ import {
   gitShowFile,
   maybeAutocommit as gitMaybeAutocommit,
 } from "../vault/git.js";
+import { getRuntime } from "../runtime/index.js";
 
 function ok(structured: unknown, text?: string) {
   const textContent = text ?? JSON.stringify(structured, null, 2);
@@ -58,10 +59,14 @@ function fail(err: unknown) {
 }
 
 function maybeAutocommit(cfg: Config, message: string) {
-  return gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message);
+  return getRuntime(cfg).runGit(() => gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message));
 }
 
 export function registerWikiTools(server: McpServer, cfg: Config): void {
+  const runtime = getRuntime(cfg);
+  const cached = <T>(scope: string, keyParts: unknown, loader: () => Promise<T>, ttlSeconds?: number) =>
+    runtime.cache.getOrSet(cfg.VAULT_ROOT, scope, keyParts, () => runtime.runRead(loader), ttlSeconds);
+
   // ---- wiki_scaffold ------------------------------------------------------
   server.registerTool(
     "wiki_scaffold",
@@ -70,7 +75,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       description: "Creates the standard directory structure (wiki/, raw/, output/) and starter files (index.md, log.md) if they don't exist.",
       inputSchema: {},
     },
-    async () => {
+    async () => runtime.runWrite(async () => {
       try {
         const root = cfg.VAULT_ROOT;
         const dirs = [
@@ -104,7 +109,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_index_rebuild -------------------------------------------------
@@ -115,7 +120,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       description: "Scans the wiki/ directory and updates wiki/index.md with a flat list of all pages and their types.",
       inputSchema: {},
     },
-    async () => {
+    async () => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -148,7 +153,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_log_append ----------------------------------------------------
@@ -161,7 +166,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
         entry: z.string().min(1).describe("The log message to append."),
       },
     },
-    async ({ entry }) => {
+    async ({ entry }) => runtime.runWrite(async () => {
       try {
         const root = cfg.VAULT_ROOT;
         let content = "";
@@ -184,7 +189,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_link_graph ----------------------------------------------------
@@ -199,19 +204,22 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
     },
     async ({ path: rel }) => {
       try {
-        const index = await scanWikiPages(cfg.VAULT_ROOT);
-        if (rel) {
-          const page = index.pages.find((p: any) => p.relPath === rel);
-          if (!page) throw new Error(`Page not found: ${rel}`);
-          const bls = index.backlinks.get(page.title.toLowerCase()) ?? [];
-          return ok({ path: rel, title: page.title, outlinks: page.outlinks, backlinks: bls });
-        }
+        const out = await cached("wiki_link_graph", { rel }, async () => {
+          const index = await scanWikiPages(cfg.VAULT_ROOT);
+          if (rel) {
+            const page = index.pages.find((p: any) => p.relPath === rel);
+            if (!page) throw new Error(`Page not found: ${rel}`);
+            const bls = index.backlinks.get(page.title.toLowerCase()) ?? [];
+            return { path: rel, title: page.title, outlinks: page.outlinks, backlinks: bls };
+          }
 
-        // Convert Map to record for JSON serialization
-        const blsRecord: Record<string, string[]> = {};
-        for (const [k, v] of index.backlinks) blsRecord[k] = v;
+          // Convert Map to record for JSON serialization
+          const blsRecord: Record<string, string[]> = {};
+          for (const [k, v] of index.backlinks) blsRecord[k] = v;
 
-        return ok({ pages: index.pages, backlinks: blsRecord });
+          return { pages: index.pages, backlinks: blsRecord };
+        });
+        return ok(out);
       } catch (err) {
         return fail(err);
       }
@@ -236,13 +244,16 @@ Returns:
     },
     async ({ required_fields }) => {
       try {
-        const index = await scanWikiPages(cfg.VAULT_ROOT);
-        const resolver = buildLinkResolver(index.pages);
-        const backlinks = buildBacklinksByPath(index.pages, resolver);
-        const issues = scanLint(index.pages, resolver, backlinks, required_fields);
-        const byType: Record<string, number> = {};
-        for (const i of issues) byType[i.type] = (byType[i.type] ?? 0) + 1;
-        return ok({ issueCount: issues.length, byType, issues });
+        const out = await cached("wiki_lint_scan", { required_fields }, async () => {
+          const index = await scanWikiPages(cfg.VAULT_ROOT);
+          const resolver = buildLinkResolver(index.pages);
+          const backlinks = buildBacklinksByPath(index.pages, resolver);
+          const issues = scanLint(index.pages, resolver, backlinks, required_fields);
+          const byType: Record<string, number> = {};
+          for (const i of issues) byType[i.type] = (byType[i.type] ?? 0) + 1;
+          return { issueCount: issues.length, byType, issues };
+        });
+        return ok(out);
       } catch (err) {
         return fail(err);
       }
@@ -259,8 +270,9 @@ Returns:
     },
     async () => {
       try {
-        const root = cfg.VAULT_ROOT;
-        const entries = await listDir(root, RAW_DIR, { depth: 10, includeDirs: false });
+        const entries = await cached("wiki_unprocessed_sources", {}, () =>
+          listDir(cfg.VAULT_ROOT, RAW_DIR, { depth: 10, includeDirs: false }),
+        );
         return ok({ count: entries.length, sources: entries });
       } catch (err) {
         return fail(err);
@@ -278,7 +290,7 @@ Returns:
     },
     async () => {
       try {
-        const status = await gitStatus(cfg.VAULT_ROOT);
+        const status = await runtime.runGit(() => gitStatus(cfg.VAULT_ROOT));
         return ok(status);
       } catch (err) {
         return fail(err);
@@ -299,7 +311,12 @@ Returns:
     },
     async ({ since_seconds, limit }) => {
       try {
-        const commits = await gitLog(cfg.VAULT_ROOT, since_seconds, limit);
+        const commits = await runtime.cache.getOrSet(
+          cfg.VAULT_ROOT,
+          "wiki_diff",
+          { since_seconds, limit },
+          () => runtime.runGit(() => gitLog(cfg.VAULT_ROOT, since_seconds, limit)),
+        );
         return ok({ count: commits.length, commits });
       } catch (err) {
         return fail(err);
@@ -318,7 +335,7 @@ Returns:
         title: z.string().optional().describe("Optional title (used for filename)."),
       },
     },
-    async ({ content, title }) => {
+    async ({ content, title }) => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -331,7 +348,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_attach_url ----------------------------------------------------
@@ -372,7 +389,7 @@ Returns:
           markdownBody
         );
 
-        await writeTextAtomic(root, relPath, content, { createParents: true });
+        await runtime.runWrite(() => writeTextAtomic(root, relPath, content, { createParents: true }));
         return ok({ status: "success", path: relPath, bytes: content.length, title });
       } catch (err) {
         return fail(err);
@@ -390,7 +407,7 @@ Returns:
     },
     async () => {
       try {
-        const result = await gitPush(cfg.VAULT_ROOT);
+        const result = await runtime.runGit(() => gitPush(cfg.VAULT_ROOT));
         if (!result.success) return fail(new Error(`Git push failed: ${result.stderr}`));
         return ok({ status: "success", stdout: result.stdout });
       } catch (err) {
@@ -412,32 +429,35 @@ Returns:
     },
     async ({ path: rel, required_fields }) => {
       try {
-        const root = cfg.VAULT_ROOT;
-        const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
-        
-        const invalidFiles: { path: string; missing: string[] }[] = [];
-        
-        for (const entry of entries) {
-          if (!entry.path.endsWith(".md")) continue;
-          try {
-            const text = await readText(root, entry.path);
-            const { frontmatter } = parseMarkdown(text);
-            
-            const missing = required_fields.filter(f => !(f in frontmatter));
-            if (missing.length > 0) {
-              invalidFiles.push({ path: entry.path, missing });
+        const out = await cached("wiki_validate_frontmatter", { rel, required_fields }, async () => {
+          const root = cfg.VAULT_ROOT;
+          const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
+
+          const invalidFiles: { path: string; missing: string[] }[] = [];
+
+          for (const entry of entries) {
+            if (!entry.path.endsWith(".md")) continue;
+            try {
+              const text = await readText(root, entry.path);
+              const { frontmatter } = parseMarkdown(text);
+
+              const missing = required_fields.filter(f => !(f in frontmatter));
+              if (missing.length > 0) {
+                invalidFiles.push({ path: entry.path, missing });
+              }
+            } catch {
+              // ignore unreadable files
             }
-          } catch {
-            // ignore unreadable files
           }
-        }
-        
-        return ok({
-          status: invalidFiles.length === 0 ? "success" : "failed",
-          scanned: entries.length,
-          invalidCount: invalidFiles.length,
-          invalidFiles
+
+          return {
+            status: invalidFiles.length === 0 ? "success" : "failed",
+            scanned: entries.length,
+            invalidCount: invalidFiles.length,
+            invalidFiles,
+          };
         });
+        return ok(out);
       } catch (err) {
         return fail(err);
       }
@@ -471,35 +491,44 @@ Returns (no-op/refusal): { pulled: false, reason, dirty_files? | conflicts? | ah
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
-        const status = await gitStatus(root);
+        const status = await runtime.runGit(() => gitStatus(root));
         if (!status.isRepo) return fail(new Error("Vault is not a git repository."));
 
-        if (!(await gitUpstream(root))) {
+        if (!(await runtime.runGit(() => gitUpstream(root)))) {
           return ok({ pulled: false, reason: "no upstream" });
         }
 
         if (status.dirty && !allow_dirty) {
-          return ok({ pulled: false, reason: "dirty", dirty_files: await gitDirtyFiles(root) });
+          return ok({ pulled: false, reason: "dirty", dirty_files: await runtime.runGit(() => gitDirtyFiles(root)) });
         }
 
-        const fetched = await gitFetch(root);
+        const fetched = await runtime.runGit(() => gitFetch(root));
         if (!fetched.success) return fail(new Error(`git fetch failed: ${fetched.stderr}`));
 
-        const { ahead, behind } = await gitAheadBehind(root);
-        if (behind === 0) return ok({ pulled: false, reason: "up to date", ahead, behind });
+        return await runtime.runWrite(async () => {
+          const freshStatus = await runtime.runGit(() => gitStatus(root));
+          if (!freshStatus.isRepo) return fail(new Error("Vault is not a git repository."));
 
-        const before = await gitHeadSha(root);
-        const result = await gitPull(root, strategy);
-        if (!result.success) {
-          if (result.reason === "conflict") {
-            return ok({ pulled: false, reason: "conflict", conflicts: result.conflicts ?? [] });
+          if (freshStatus.dirty && !allow_dirty) {
+            return ok({ pulled: false, reason: "dirty", dirty_files: await runtime.runGit(() => gitDirtyFiles(root)) });
           }
-          return ok({ pulled: false, reason: result.reason ?? "failed", detail: result.stderr });
-        }
 
-        const after = await gitHeadSha(root);
-        const files_changed = before && after ? await gitChangedBetween(root, before, after) : [];
-        return ok({ pulled: true, files_changed, ahead, behind, sha: after });
+          const { ahead, behind } = await runtime.runGit(() => gitAheadBehind(root));
+          if (behind === 0) return ok({ pulled: false, reason: "up to date", ahead, behind });
+
+          const before = await runtime.runGit(() => gitHeadSha(root));
+          const result = await runtime.runGit(() => gitPull(root, strategy));
+          if (!result.success) {
+            if (result.reason === "conflict") {
+              return ok({ pulled: false, reason: "conflict", conflicts: result.conflicts ?? [] });
+            }
+            return ok({ pulled: false, reason: result.reason ?? "failed", detail: result.stderr });
+          }
+
+          const after = await runtime.runGit(() => gitHeadSha(root));
+          const files_changed = before && after ? await runtime.runGit(() => gitChangedBetween(root, before, after)) : [];
+          return ok({ pulled: true, files_changed, ahead, behind, sha: after });
+        });
       } catch (err) {
         return fail(err);
       }
@@ -526,7 +555,7 @@ Returns:
         required_fields: z.array(z.string()).default(["type", "title"]),
       },
     },
-    async ({ dry_run, fixes, required_fields }) => {
+    async ({ dry_run, fixes, required_fields }) => runtime.runWrite(async () => {
       if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -644,7 +673,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_file_history --------------------------------------------------
@@ -669,9 +698,9 @@ Returns:
     },
     async ({ path: rel, limit, sha }) => {
       try {
-        const commits = await gitFileHistory(cfg.VAULT_ROOT, rel, limit);
+        const commits = await runtime.runGit(() => gitFileHistory(cfg.VAULT_ROOT, rel, limit));
         const out: Record<string, unknown> = { path: rel, count: commits.length, commits };
-        if (sha) out.contents_at_sha = await gitShowFile(cfg.VAULT_ROOT, sha, rel);
+        if (sha) out.contents_at_sha = await runtime.runGit(() => gitShowFile(cfg.VAULT_ROOT, sha, rel));
         return ok(out);
       } catch (err) {
         return fail(err);
@@ -697,33 +726,36 @@ Returns:
     },
     async ({ path: rel }) => {
       try {
-        const root = cfg.VAULT_ROOT;
-        const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
-        const agg = new Map<string, Set<string>>();
-        const addTag = (raw: string, page: string) => {
-          const tag = raw.replace(/^#/, "").trim();
-          if (!tag) return;
-          const set = agg.get(tag) ?? new Set<string>();
-          set.add(page);
-          agg.set(tag, set);
-        };
-        for (const entry of entries) {
-          if (!entry.path.endsWith(".md")) continue;
-          try {
-            const text = await readText(root, entry.path);
-            const { frontmatter, body } = parseMarkdown(text);
-            const fmTags = frontmatter.tags;
-            if (Array.isArray(fmTags)) for (const t of fmTags) addTag(String(t), entry.path);
-            else if (typeof fmTags === "string") for (const t of fmTags.split(/[,\s]+/)) addTag(t, entry.path);
-            for (const t of extractInlineTags(body)) addTag(t, entry.path);
-          } catch {
-            // skip unreadable files
+        const out = await cached("wiki_tags", { rel }, async () => {
+          const root = cfg.VAULT_ROOT;
+          const entries = await listDir(root, rel, { depth: 10, includeDirs: false });
+          const agg = new Map<string, Set<string>>();
+          const addTag = (raw: string, page: string) => {
+            const tag = raw.replace(/^#/, "").trim();
+            if (!tag) return;
+            const set = agg.get(tag) ?? new Set<string>();
+            set.add(page);
+            agg.set(tag, set);
+          };
+          for (const entry of entries) {
+            if (!entry.path.endsWith(".md")) continue;
+            try {
+              const text = await readText(root, entry.path);
+              const { frontmatter, body } = parseMarkdown(text);
+              const fmTags = frontmatter.tags;
+              if (Array.isArray(fmTags)) for (const t of fmTags) addTag(String(t), entry.path);
+              else if (typeof fmTags === "string") for (const t of fmTags.split(/[,\s]+/)) addTag(t, entry.path);
+              for (const t of extractInlineTags(body)) addTag(t, entry.path);
+            } catch {
+              // skip unreadable files
+            }
           }
-        }
-        const tags = [...agg.entries()]
-          .map(([tag, pages]) => ({ tag, count: pages.size, pages: [...pages].sort() }))
-          .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
-        return ok({ tagCount: tags.length, tags });
+          const tags = [...agg.entries()]
+            .map(([tag, pages]) => ({ tag, count: pages.size, pages: [...pages].sort() }))
+            .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+          return { tagCount: tags.length, tags };
+        });
+        return ok(out);
       } catch (err) {
         return fail(err);
       }
@@ -752,7 +784,7 @@ Returns:
         dry_run: z.boolean().default(true),
       },
     },
-    async ({ from, to, path: rel, dry_run }) => {
+    async ({ from, to, path: rel, dry_run }) => runtime.runWrite(async () => {
       if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
@@ -792,7 +824,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 
   // ---- wiki_template_list -------------------------------------------------
@@ -808,25 +840,28 @@ Returns:
     },
     async () => {
       try {
-        const root = cfg.VAULT_ROOT;
-        const dir = "templates";
-        if (!(await exists(root, dir))) return ok({ count: 0, templates: [] });
-        const entries = await listDir(root, dir, { depth: 5, includeDirs: false });
-        const templates: { path: string; name: string; variables: string[] }[] = [];
-        for (const entry of entries) {
-          if (!entry.path.endsWith(".md")) continue;
-          try {
-            const content = await readText(root, entry.path);
-            templates.push({
-              path: entry.path,
-              name: path.basename(entry.path, ".md"),
-              variables: extractTemplateVars(content),
-            });
-          } catch {
-            // skip unreadable files
+        const out = await cached("wiki_template_list", {}, async () => {
+          const root = cfg.VAULT_ROOT;
+          const dir = "templates";
+          if (!(await exists(root, dir))) return { count: 0, templates: [] };
+          const entries = await listDir(root, dir, { depth: 5, includeDirs: false });
+          const templates: { path: string; name: string; variables: string[] }[] = [];
+          for (const entry of entries) {
+            if (!entry.path.endsWith(".md")) continue;
+            try {
+              const content = await readText(root, entry.path);
+              templates.push({
+                path: entry.path,
+                name: path.basename(entry.path, ".md"),
+                variables: extractTemplateVars(content),
+              });
+            } catch {
+              // skip unreadable files
+            }
           }
-        }
-        return ok({ count: templates.length, templates });
+          return { count: templates.length, templates };
+        });
+        return ok(out);
       } catch (err) {
         return fail(err);
       }
@@ -861,7 +896,7 @@ Returns:
         dry_run: z.boolean().default(false),
       },
     },
-    async ({ from, into, separator, delete_source, relink, dry_run }) => {
+    async ({ from, into, separator, delete_source, relink, dry_run }) => runtime.runWrite(async () => {
       if (!dry_run && cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       if (from === into) return fail(new Error("'from' and 'into' must differ."));
       if (delete_source && !relink) return fail(new Error("Refusing delete_source with relink=false: every inbound [[from]] link would break. Set relink=true or delete_source=false."));
@@ -944,6 +979,6 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    }
+    })
   );
 }

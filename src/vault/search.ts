@@ -35,12 +35,26 @@ export async function searchText(
   return nodeSearch(vaultRoot, subAbs, query, { ...opts, maxResults: max });
 }
 
+const whichCache = new Map<string, { promise: Promise<boolean>; expiresAt: number }>();
+const WHICH_MISS_TTL_MS = 5_000;
+
 async function which(bin: string): Promise<boolean> {
-  return new Promise((resolve) => {
+  const cached = whichCache.get(bin);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const result = new Promise<boolean>((resolve) => {
     const p = spawn(process.platform === "win32" ? "where" : "which", [bin], { stdio: "ignore" });
     p.on("close", (code) => resolve(code === 0));
     p.on("error", () => resolve(false));
+  }).then((found) => {
+    const entry = whichCache.get(bin);
+    if (entry?.promise === result) {
+      entry.expiresAt = found ? Number.POSITIVE_INFINITY : Date.now() + WHICH_MISS_TTL_MS;
+    }
+    return found;
   });
+  whichCache.set(bin, { promise: result, expiresAt: Date.now() + WHICH_MISS_TTL_MS });
+  return result;
 }
 
 async function rgSearch(
@@ -67,6 +81,7 @@ async function rgSearch(
     const child = spawn("rg", args);
     let buffer = "";
     const out: SearchMatch[] = [];
+    let killed = false;
     child.stdout.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
       let idx: number;
@@ -83,6 +98,11 @@ async function rgSearch(
               line: ev.data.line_number,
               text: ev.data.lines.text.replace(/\r?\n$/, ""),
             });
+            if (out.length >= opts.maxResults && !killed) {
+              killed = true;
+              child.kill();
+              break;
+            }
           }
         } catch {
           // ignore non-JSON lines

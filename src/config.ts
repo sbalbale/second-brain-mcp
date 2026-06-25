@@ -7,27 +7,39 @@ const boolFromEnv = z
   .pipe(z.enum(["true", "false", "1", "0", "yes", "no"]))
   .transform((v) => v === "true" || v === "1" || v === "yes");
 
+const optionalString = z
+  .string()
+  .optional()
+  .transform((v) => (v && v.length > 0 ? v : undefined));
+
 const ConfigSchema = z.object({
   VAULT_ROOT: z.string().min(1, "VAULT_ROOT must be set").transform((p) => path.resolve(p)),
   TRANSPORT: z.enum(["http", "stdio"]).default("http"),
   HOST: z.string().default("127.0.0.1"),
   PORT: z.coerce.number().int().min(1).max(65535).default(8787),
-  AUTH_TOKEN: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
-  OAUTH_ISSUER: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
-  OAUTH_AUDIENCE: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
-  OAUTH_AUTH_ENDPOINT: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
-  OAUTH_TOKEN_ENDPOINT: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
-  CF_ACCESS_TEAM_DOMAIN: z
-    .string()
-    .optional()
-    .transform((v) => (v && v.length > 0 ? v : undefined)),
-  CF_ACCESS_AUD: z.string().optional().transform((v) => (v && v.length > 0 ? v : undefined)),
+  AUTH_TOKEN: optionalString,
+  OAUTH_ISSUER: optionalString,
+  OAUTH_AUDIENCE: optionalString,
+  OAUTH_AUTH_ENDPOINT: optionalString,
+  OAUTH_TOKEN_ENDPOINT: optionalString,
+  CF_ACCESS_TEAM_DOMAIN: optionalString,
+  CF_ACCESS_AUD: optionalString,
   VAULT_AUTOCOMMIT: boolFromEnv.default("true"),
   DEFAULT_RESPONSE_FORMAT: z.preprocess(
     (v) => (v === "" ? undefined : v),
     z.enum(["markdown", "json"]).default("markdown"),
   ),
   READ_ONLY: boolFromEnv.default("false"),
+  CACHE_ENABLED: boolFromEnv.default("true"),
+  REDIS_URL: optionalString,
+  CACHE_NAMESPACE: z.string().min(1).default("second-brain-mcp"),
+  CACHE_TTL_SECONDS: z.coerce.number().int().min(0).default(30),
+  CACHE_MAX_ENTRIES: z.coerce.number().int().min(10).default(1000),
+  MAX_READ_CONCURRENCY: z.coerce.number().int().min(1).default(16),
+  MAX_WRITE_CONCURRENCY: z.coerce.number().int().min(1).default(1),
+  GIT_CONCURRENCY: z.coerce.number().int().min(1).default(1),
+  RAG_QUERY_CONCURRENCY: z.coerce.number().int().min(1).default(2),
+  QMD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).default(2000),
 }).refine(
   (data) => {
     const hasAnyOAuth = !!(data.OAUTH_ISSUER || data.OAUTH_AUDIENCE || data.OAUTH_AUTH_ENDPOINT || data.OAUTH_TOKEN_ENDPOINT);

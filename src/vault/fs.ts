@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { safeJoin, assertRealPathInside, toVaultRel, PathSafetyError } from "./paths.js";
 import { TRASH_DIR } from "../constants.js";
+import { notifyVaultMutation } from "../runtime/vault-events.js";
 
 export interface FileEntry {
   path: string; // vault-relative, posix
@@ -39,7 +40,7 @@ export async function writeTextAtomic(
   vaultRoot: string,
   relPath: string,
   contents: string,
-  opts: { createParents?: boolean } = {},
+  opts: { createParents?: boolean; notifyMutation?: boolean } = {},
 ): Promise<{ absPath: string; relPath: string; bytes: number }> {
   const abs = safeJoin(vaultRoot, relPath);
   const dir = path.dirname(abs);
@@ -56,7 +57,11 @@ export async function writeTextAtomic(
     await handle.close();
   }
   await fs.rename(tmp, abs);
-  return { absPath: abs, relPath: toVaultRel(vaultRoot, abs), bytes: buf.byteLength };
+  const written = { absPath: abs, relPath: toVaultRel(vaultRoot, abs), bytes: buf.byteLength };
+  if (opts.notifyMutation !== false) {
+    await notifyVaultMutation(vaultRoot, written.relPath);
+  }
+  return written;
 }
 
 /** Move / rename inside the vault. Both paths must stay inside VAULT_ROOT. */
@@ -80,7 +85,10 @@ export async function moveInside(
     }
   }
   await fs.rename(fromAbs, toAbs);
-  return { from: toVaultRel(vaultRoot, fromAbs), to: toVaultRel(vaultRoot, toAbs) };
+  const moved = { from: toVaultRel(vaultRoot, fromAbs), to: toVaultRel(vaultRoot, toAbs) };
+  await notifyVaultMutation(vaultRoot, moved.from);
+  await notifyVaultMutation(vaultRoot, moved.to);
+  return moved;
 }
 
 /**
@@ -97,7 +105,10 @@ export async function softDelete(
   const trashAbs = safeJoin(vaultRoot, trashRel);
   await fs.mkdir(path.dirname(trashAbs), { recursive: true });
   await fs.rename(abs, trashAbs);
-  return { originalPath: toVaultRel(vaultRoot, abs), trashPath: toVaultRel(vaultRoot, trashAbs) };
+  const deleted = { originalPath: toVaultRel(vaultRoot, abs), trashPath: toVaultRel(vaultRoot, trashAbs) };
+  await notifyVaultMutation(vaultRoot, deleted.originalPath);
+  await notifyVaultMutation(vaultRoot, deleted.trashPath);
+  return deleted;
 }
 
 /** Timestamp suffix appended by softDelete (ISO with ':' and '.' replaced by '-'). */
@@ -174,7 +185,10 @@ export async function restoreFromTrash(
   }
   await fs.mkdir(path.dirname(originalAbs), { recursive: true });
   await fs.rename(trashAbs, originalAbs);
-  return { trashPath: toVaultRel(vaultRoot, trashAbs), restoredPath: toVaultRel(vaultRoot, originalAbs) };
+  const restored = { trashPath: toVaultRel(vaultRoot, trashAbs), restoredPath: toVaultRel(vaultRoot, originalAbs) };
+  await notifyVaultMutation(vaultRoot, restored.trashPath);
+  await notifyVaultMutation(vaultRoot, restored.restoredPath);
+  return restored;
 }
 
 /**

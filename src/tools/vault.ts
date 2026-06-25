@@ -20,6 +20,7 @@ import { qmdQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
+import { getRuntime } from "../runtime/index.js";
 
 /** Shared helper: format a tool response with both text and structured content. */
 function ok(structured: unknown, text?: string) {
@@ -52,10 +53,14 @@ function maybeAutocommit(
   cfg: Config,
   message: string,
 ): Promise<{ committed: boolean; sha: string | null }> {
-  return gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message);
+  return getRuntime(cfg).runGit(() => gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message));
 }
 
 export function registerVaultTools(server: McpServer, cfg: Config): void {
+  const runtime = getRuntime(cfg);
+  const cached = <T>(scope: string, keyParts: unknown, loader: () => Promise<T>, ttlSeconds?: number) =>
+    runtime.cache.getOrSet(cfg.VAULT_ROOT, scope, keyParts, () => runtime.runRead(loader), ttlSeconds);
+
   // ---- vault_read ---------------------------------------------------------
   server.registerTool(
     "vault_read",
@@ -80,7 +85,7 @@ Returns:
     },
     async ({ path: rel, response_format }) => {
       try {
-        const text = await readText(cfg.VAULT_ROOT, rel);
+        const text = await cached("vault_read", { rel }, () => readText(cfg.VAULT_ROOT, rel));
         const parsed = parseMarkdown(text);
         const out = {
           path: rel,
@@ -124,7 +129,7 @@ Returns:
       const results = await Promise.all(
         paths.map(async (p) => {
           try {
-            const text = await readText(cfg.VAULT_ROOT, p);
+            const text = await cached("vault_read", { rel: p }, () => readText(cfg.VAULT_ROOT, p));
             const parsed = parseMarkdown(text);
             return { path: p, ok: true, frontmatter: parsed.frontmatter, body: parsed.body };
           } catch (err) {
@@ -161,7 +166,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ path: rel, content, frontmatter, mode, commit_message }) => {
+    async ({ path: rel, content, frontmatter, mode, commit_message }) => runtime.runWrite(async () => {
       try {
         let finalText: string;
         if (mode === "merge-frontmatter") {
@@ -183,13 +188,13 @@ Returns:
           finalText = frontmatter ? buildMarkdown(frontmatter, content) : content;
         }
         const res = await writeTextAtomic(cfg.VAULT_ROOT, rel, finalText, { createParents: true });
-        startQmdUpdate(cfg.VAULT_ROOT);
+        startQmdUpdate(cfg.VAULT_ROOT, cfg.QMD_UPDATE_DEBOUNCE_MS);
         const commit = await maybeAutocommit(cfg, commit_message ?? `vault_write: ${rel}`);
         return ok({ path: res.relPath, bytes: res.bytes, ...commit });
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_list ---------------------------------------------------------
@@ -217,7 +222,9 @@ Returns:
     },
     async ({ path: rel, depth, glob, include_dirs }) => {
       try {
-        const entries = await listDir(cfg.VAULT_ROOT, rel, { depth, globFilter: glob, includeDirs: include_dirs });
+        const entries = await cached("vault_list", { rel, depth, glob, include_dirs }, () =>
+          listDir(cfg.VAULT_ROOT, rel, { depth, globFilter: glob, includeDirs: include_dirs }),
+        );
         return ok({ count: entries.length, entries });
       } catch (err) {
         return fail(err);
@@ -254,9 +261,13 @@ Returns:
     },
     async ({ query, regex, case_sensitive, path: rel, globs, max_results }) => {
       try {
-        const matches = await searchText(cfg.VAULT_ROOT, query, {
-          regex, caseSensitive: case_sensitive, path: rel, globs, maxResults: max_results,
-        });
+        const matches = await cached(
+          "vault_search",
+          { query, regex, case_sensitive, rel, globs, max_results },
+          () => searchText(cfg.VAULT_ROOT, query, {
+            regex, caseSensitive: case_sensitive, path: rel, globs, maxResults: max_results,
+          }),
+        );
         return ok({ count: matches.length, matches });
       } catch (err) {
         return fail(err);
@@ -289,29 +300,32 @@ Returns:
     },
     async ({ field, predicate, value, path: rel }) => {
       try {
-        const entries = await listDir(cfg.VAULT_ROOT, rel, { depth: 10, globFilter: `${rel === "." ? "" : rel + "/"}**/*.md`, includeDirs: false });
-        const matches: { path: string; value: unknown }[] = [];
-        for (const e of entries) {
-          try {
-            const text = await readText(cfg.VAULT_ROOT, e.path);
-            const parsed = parseMarkdown(text);
-            if (!(field in parsed.frontmatter)) continue;
-            const fieldValue = parsed.frontmatter[field];
-            if (predicate === "exists") {
-              matches.push({ path: e.path, value: fieldValue });
-            } else if (predicate === "equals") {
-              if (fieldValue === value) matches.push({ path: e.path, value: fieldValue });
-            } else if (predicate === "contains") {
-              if (Array.isArray(fieldValue) && fieldValue.includes(value as never)) {
-                matches.push({ path: e.path, value: fieldValue });
-              } else if (typeof fieldValue === "string" && typeof value === "string" && fieldValue.includes(value)) {
-                matches.push({ path: e.path, value: fieldValue });
+        const matches = await cached("vault_search_frontmatter", { field, predicate, value, rel }, async () => {
+          const entries = await listDir(cfg.VAULT_ROOT, rel, { depth: 10, globFilter: `${rel === "." ? "" : rel + "/"}**/*.md`, includeDirs: false });
+          const out: { path: string; value: unknown }[] = [];
+          for (const e of entries) {
+            try {
+              const text = await readText(cfg.VAULT_ROOT, e.path);
+              const parsed = parseMarkdown(text);
+              if (!(field in parsed.frontmatter)) continue;
+              const fieldValue = parsed.frontmatter[field];
+              if (predicate === "exists") {
+                out.push({ path: e.path, value: fieldValue });
+              } else if (predicate === "equals") {
+                if (fieldValue === value) out.push({ path: e.path, value: fieldValue });
+              } else if (predicate === "contains") {
+                if (Array.isArray(fieldValue) && fieldValue.includes(value as never)) {
+                  out.push({ path: e.path, value: fieldValue });
+                } else if (typeof fieldValue === "string" && typeof value === "string" && fieldValue.includes(value)) {
+                  out.push({ path: e.path, value: fieldValue });
+                }
               }
+            } catch {
+              // skip unreadable files
             }
-          } catch {
-            // skip unreadable files
           }
-        }
+          return out;
+        });
         return ok({ count: matches.length, files: matches });
       } catch (err) {
         return fail(err);
@@ -346,7 +360,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ from, to, create_parents, overwrite, relink }) => {
+    async ({ from, to, create_parents, overwrite, relink }) => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const doRelink = relink && /\.md$/i.test(from);
@@ -409,7 +423,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_delete -------------------------------------------------------
@@ -431,7 +445,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ path: rel, confirm }) => {
+    async ({ path: rel, confirm }) => runtime.runWrite(async () => {
       if (!confirm) return fail(new Error("Refusing to delete without confirm=true."));
       try {
         const res = await softDelete(cfg.VAULT_ROOT, rel);
@@ -440,7 +454,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_restore ------------------------------------------------------
@@ -462,7 +476,7 @@ Returns (restore): { trashPath, restoredPath, committed, sha }`,
       },
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
     },
-    async ({ path: rel, overwrite }) => {
+    async ({ path: rel, overwrite }) => runtime.runWrite(async () => {
       try {
         if (!rel) {
           const entries = await listTrash(cfg.VAULT_ROOT);
@@ -475,7 +489,7 @@ Returns (restore): { trashPath, restoredPath, committed, sha }`,
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_frontmatter_update ------------------------------------------
@@ -499,7 +513,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
     },
-    async ({ paths, updates, array_strategy }) => {
+    async ({ paths, updates, array_strategy }) => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       const report: { path: string; ok: boolean; error?: string }[] = [];
       let updated = 0;
@@ -516,7 +530,7 @@ Returns:
       }
       const commit = await maybeAutocommit(cfg, `vault_frontmatter_update: ${updated} file(s)`);
       return ok({ updated, files: report, ...commit });
-    },
+    }),
   );
 
   // ---- vault_apply_template -----------------------------------------------
@@ -540,7 +554,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ template_path, destination_path, variables }) => {
+    async ({ template_path, destination_path, variables }) => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         let templateContent = await readText(cfg.VAULT_ROOT, template_path);
@@ -556,7 +570,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_canvas_read --------------------------------------------------
@@ -573,7 +587,7 @@ Returns:
     async ({ path: rel }) => {
       try {
         if (!rel.endsWith('.canvas')) return fail(new Error("Path must end with .canvas"));
-        const text = await readText(cfg.VAULT_ROOT, rel);
+        const text = await cached("vault_read", { rel }, () => readText(cfg.VAULT_ROOT, rel));
         const canvas = JSON.parse(text);
         return ok({ path: rel, canvas });
       } catch (err) {
@@ -597,7 +611,7 @@ Returns:
       },
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
     },
-    async ({ path: rel, canvas }) => {
+    async ({ path: rel, canvas }) => runtime.runWrite(async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         if (!rel.endsWith('.canvas')) return fail(new Error("Path must end with .canvas"));
@@ -608,7 +622,7 @@ Returns:
       } catch (err) {
         return fail(err);
       }
-    },
+    }),
   );
 
   // ---- vault_rag_index ----------------------------------------------------
@@ -623,7 +637,7 @@ Returns:
     async () => {
       if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
-        const status = await startQmdIndexing(cfg.VAULT_ROOT);
+        const status = await runtime.runRag(() => startQmdIndexing(cfg.VAULT_ROOT));
         return ok({
           status: "started",
           provider: "qmd",
@@ -674,7 +688,12 @@ Returns:
     },
     async ({ query, limit }) => {
       try {
-        const results = qmdQuery(query, limit);
+        const results = await runtime.cache.getOrSet(
+          cfg.VAULT_ROOT,
+          "vault_rag_search",
+          { query, limit },
+          () => runtime.runRag(() => qmdQuery(query, limit)),
+        );
         return ok({
           count: results.length,
           results: results.map(r => ({ path: r.displayPath, score: r.score, snippet: r.snippet, title: r.title })),
@@ -707,41 +726,46 @@ Returns:
     },
     async ({ window_seconds }) => {
       try {
-        const index = await scanWikiPages(cfg.VAULT_ROOT);
-        const resolver = buildLinkResolver(index.pages);
-        const backlinks = buildBacklinksByPath(index.pages, resolver);
+        const statsTtlSeconds =
+          window_seconds > 0 ? Math.min(cfg.CACHE_TTL_SECONDS, 5) : cfg.CACHE_TTL_SECONDS;
+        const out = await cached("vault_stats", { window_seconds }, async () => {
+          const index = await scanWikiPages(cfg.VAULT_ROOT);
+          const resolver = buildLinkResolver(index.pages);
+          const backlinks = buildBacklinksByPath(index.pages, resolver);
 
-        const noteCount = index.pages.length;
-        const totalOutlinks = index.pages.reduce((n, p) => n + p.outlinks.length, 0);
-        const orphans = index.pages
-          .filter((p) => (backlinks.get(p.relPath) ?? []).length === 0)
-          .map((p) => p.relPath);
+          const noteCount = index.pages.length;
+          const totalOutlinks = index.pages.reduce((n, p) => n + p.outlinks.length, 0);
+          const orphans = index.pages
+            .filter((p) => (backlinks.get(p.relPath) ?? []).length === 0)
+            .map((p) => p.relPath);
 
-        let wordCount = 0;
-        for (const p of index.pages) {
-          try {
-            const { body } = parseMarkdown(await readText(cfg.VAULT_ROOT, p.relPath));
-            wordCount += body.split(/\s+/).filter(Boolean).length;
-          } catch {
-            // skip unreadable files
+          let wordCount = 0;
+          for (const p of index.pages) {
+            try {
+              const { body } = parseMarkdown(await readText(cfg.VAULT_ROOT, p.relPath));
+              wordCount += body.split(/\s+/).filter(Boolean).length;
+            } catch {
+              // skip unreadable files
+            }
           }
-        }
 
-        const commits = await gitLog(cfg.VAULT_ROOT, window_seconds, 1000);
-        const filesTouched = new Set<string>();
-        for (const c of commits) for (const f of c.files) filesTouched.add(f);
+          const commits = await gitLog(cfg.VAULT_ROOT, window_seconds, 1000);
+          const filesTouched = new Set<string>();
+          for (const c of commits) for (const f of c.files) filesTouched.add(f);
 
-        const round2 = (n: number) => Math.round(n * 100) / 100;
-        return ok({
-          noteCount,
-          wordCount,
-          totalOutlinks,
-          linkDensity: noteCount ? round2(totalOutlinks / noteCount) : 0,
-          orphanCount: orphans.length,
-          orphanRatio: noteCount ? round2(orphans.length / noteCount) : 0,
-          orphans: orphans.slice(0, 50),
-          window: { seconds: window_seconds, commits: commits.length, filesTouched: filesTouched.size },
-        });
+          const round2 = (n: number) => Math.round(n * 100) / 100;
+          return {
+            noteCount,
+            wordCount,
+            totalOutlinks,
+            linkDensity: noteCount ? round2(totalOutlinks / noteCount) : 0,
+            orphanCount: orphans.length,
+            orphanRatio: noteCount ? round2(orphans.length / noteCount) : 0,
+            orphans: orphans.slice(0, 50),
+            window: { seconds: window_seconds, commits: commits.length, filesTouched: filesTouched.size },
+          };
+        }, statsTtlSeconds);
+        return ok(out);
       } catch (err) {
         return fail(err);
       }

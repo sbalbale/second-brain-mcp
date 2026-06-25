@@ -28,13 +28,33 @@ export function qmdEmbed(): void {
   execFileSync("qmd", ["embed"], { stdio: "inherit" });
 }
 
-export function qmdQuery(query: string, limit: number = 5, minScore: number = 0.2): QmdResult[] {
-  const raw = execFileSync(
-    "qmd",
-    ["query", query, "--json", "-n", String(limit), "--min-score", String(minScore)],
-    { encoding: "utf8" }
-  );
-  return JSON.parse(raw) as QmdResult[];
+export function qmdQuery(query: string, limit: number = 5, minScore: number = 0.2): Promise<QmdResult[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("qmd", ["query", query, "--json", "-n", String(limit), "--min-score", String(minScore)]);
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code, signal) => {
+      if (code !== 0) {
+        const suffix = signal ? ` (signal ${signal})` : "";
+        reject(new Error(`qmd query exited with code ${code ?? 1}${suffix}: ${stderr.trim()}`));
+        return;
+      }
+
+      try {
+        resolve(JSON.parse(stdout) as QmdResult[]);
+      } catch (err) {
+        reject(err);
+      }
+    });
+  });
 }
 
 function nowIso(): string {
@@ -46,7 +66,11 @@ function describeError(err: unknown): string {
 }
 
 async function writeStatus(vaultRoot: string, status: QmdIndexStatus): Promise<void> {
-  await writeTextAtomic(vaultRoot, RAG_INDEX_STATUS_FILE, JSON.stringify(status, null, 2), { createParents: true });
+  activeIndexJobs.set(vaultRoot, status);
+  await writeTextAtomic(vaultRoot, RAG_INDEX_STATUS_FILE, JSON.stringify(status, null, 2), {
+    createParents: true,
+    notifyMutation: false,
+  });
 }
 
 function runQmd(vaultRoot: string, args: string[]): Promise<void> {
@@ -113,7 +137,14 @@ async function runQmdIndexJob(vaultRoot: string, jobId: string): Promise<void> {
   }
 }
 
+const activeIndexJobs = new Map<string, QmdIndexStatus>();
+const pendingUpdates = new Map<string, NodeJS.Timeout>();
+const runningUpdates = new Set<string>();
+
 export async function startQmdIndexing(vaultRoot: string): Promise<QmdIndexStatus> {
+  const active = activeIndexJobs.get(vaultRoot);
+  if (active) return active;
+
   const jobId = randomUUID();
   const startedAt = nowIso();
   const status: QmdIndexStatus = {
@@ -124,15 +155,43 @@ export async function startQmdIndexing(vaultRoot: string): Promise<QmdIndexStatu
     updatedAt: startedAt,
   };
 
-  await writeStatus(vaultRoot, status);
-  void runQmdIndexJob(vaultRoot, jobId);
+  try {
+    await writeStatus(vaultRoot, status);
+  } catch (err) {
+    activeIndexJobs.delete(vaultRoot);
+    throw err;
+  }
+  void runQmdIndexJob(vaultRoot, jobId).finally(() => activeIndexJobs.delete(vaultRoot));
   return status;
 }
 
-export function startQmdUpdate(vaultRoot: string): void {
-  void runQmd(vaultRoot, ["update"]).catch((err) => {
-    console.error(`qmd update failed: ${describeError(err)}`);
-  });
+export function startQmdUpdate(vaultRoot: string, debounceMs = 0): void {
+  const existing = pendingUpdates.get(vaultRoot);
+  if (existing) clearTimeout(existing);
+
+  const run = () => {
+    pendingUpdates.delete(vaultRoot);
+
+    if (runningUpdates.has(vaultRoot)) {
+      pendingUpdates.set(vaultRoot, setTimeout(run, Math.max(debounceMs, 1000)));
+      return;
+    }
+
+    runningUpdates.add(vaultRoot);
+    void runQmd(vaultRoot, ["update"])
+      .catch((err) => {
+        console.error(`qmd update failed: ${describeError(err)}`);
+      })
+      .finally(() => {
+        runningUpdates.delete(vaultRoot);
+      });
+  };
+
+  if (debounceMs > 0) {
+    pendingUpdates.set(vaultRoot, setTimeout(run, debounceMs));
+  } else {
+    run();
+  }
 }
 
 export async function readQmdIndexStatus(vaultRoot: string): Promise<QmdIndexStatus | null> {

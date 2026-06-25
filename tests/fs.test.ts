@@ -13,6 +13,7 @@ import {
   softDelete,
   writeTextAtomic,
 } from '../src/vault/fs.js';
+import { onVaultMutation } from '../src/runtime/vault-events.js';
 
 describe('globToRegExp', () => {
   test('handles *, **, ?, and regex metacharacters', () => {
@@ -57,6 +58,22 @@ describe('vault fs helpers', () => {
     expect(deleted.trashPath).toMatch(/^\.trash\/archive\/b\.md\./);
     expect(await exists(root, 'archive/b.md')).toBe(false);
     expect(await readText(root, deleted.trashPath)).toBe('hello');
+  });
+
+  test('writeTextAtomic can suppress mutation notifications', async () => {
+    const seen: string[] = [];
+    const unsubscribe = onVaultMutation((eventRoot, rel) => {
+      if (eventRoot === root && rel) seen.push(rel);
+    });
+
+    try {
+      await writeTextAtomic(root, 'notes/silent.md', 'quiet', { createParents: true, notifyMutation: false });
+      await writeTextAtomic(root, 'notes/loud.md', 'hello', { createParents: true });
+
+      expect(seen).toEqual(['notes/loud.md']);
+    } finally {
+      unsubscribe();
+    }
   });
 
   test('softDelete -> listTrash -> restoreFromTrash round-trips a file', async () => {

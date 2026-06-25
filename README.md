@@ -11,6 +11,7 @@ Based on the LLM-Wiki pattern from [Andrej Karpathy's gist](https://gist.github.
 - **Wiki maintenance** — a read-only lint scan (broken / ambiguous links, orphans, missing frontmatter) paired with an apply tool that auto-fixes the mechanical subset, plus note-merging that relinks references to the survivor.
 - **Git round-trip** — the vault is a git repo; push (`wiki_sync`), pull (`wiki_pull`, fast-forward-only by default with conflicts surfaced as data), status, per-file history, and time-windowed diffs.
 - **Semantic search** — hybrid BM25 + vector search via [qmd](https://github.com/tobilu/qmd), running local GGUF models. No API key, no rate limits, no data leaving the server.
+- **Throughput controls** — read/search/RAG work runs through bounded queue lanes, repeated concurrent queries collapse into one in-flight job, and a self-hosted Redis cache shared by Docker containers absorbs bursts.
 - **Wiki workflow prompts** — `wiki_init`, `wiki_ingest`, `wiki_query`, `wiki_lint`. These return the playbook text from the upstream SKILL.md files so any MCP-capable LLM client can execute the LLM-Wiki workflows using the tools above.
 - **Remote access** — streamable HTTP transport, fronted by Cloudflare Tunnel + Cloudflare Access (OAuth). The vault machine opens no inbound ports.
 
@@ -31,7 +32,7 @@ second-brain-mcp/
 │   ├── deploy-docker.md
 │   └── clients.md
 ├── Dockerfile
-├── docker-compose.yml      # mcp + cloudflared sidecar
+├── docker-compose.yml      # mcp + self-hosted Redis + cloudflared sidecar
 └── .env.example
 ```
 
@@ -61,9 +62,21 @@ See [docs/deploy-cloudflare.md](docs/deploy-cloudflare.md) for the end-to-end wa
 2. In the Cloudflare Zero Trust dashboard, create a Tunnel, pick a public hostname (e.g. `vault.yourdomain.com`), route it to `http://mcp:8787`, and copy the tunnel token.
 3. Create a Cloudflare Access application for that hostname (email-gated is easiest). Note the Application Audience (AUD) tag.
 4. Fill in `.env` next to `docker-compose.yml` with `VAULT_PATH`, `AUTH_TOKEN`, `CF_TUNNEL_TOKEN`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`.
-5. `docker compose up -d` — qmd is installed in the image and auto-configured on first start via the entrypoint script.
+5. `docker compose up -d` — qmd is installed in the image and auto-configured on first start via the entrypoint script. Compose also starts a private Redis sidecar for shared cache; it is only exposed on the internal Docker network.
 6. Call `vault_rag_index` from your MCP client once to build the initial index. It now starts a background job and writes progress to `output/qmd-index-status.json` so the request returns before Cloudflare's 120-second timeout; the first run still downloads ~2 GB of GGUF models into the `qmd-models` Docker volume.
 7. Add the server to your MCP client (see [docs/clients.md](docs/clients.md)).
+
+## Throughput model
+
+The server keeps normal MCP calls synchronous, but protects the vault with workload lanes:
+
+- `MAX_READ_CONCURRENCY` controls concurrent read/search/list/scan work.
+- `MAX_WRITE_CONCURRENCY` defaults to `1` so writes, moves, deletes, and relinks cannot race each other.
+- `GIT_CONCURRENCY` defaults to `1` to avoid git lock collisions.
+- `RAG_QUERY_CONCURRENCY` keeps local qmd searches from monopolizing the host.
+- `QMD_UPDATE_DEBOUNCE_MS` coalesces write-triggered qmd updates after bursts.
+
+Set `REDIS_URL=redis://redis:6379` when using the included Compose stack. If Redis is unavailable or `REDIS_URL` is unset, the server falls back to process-local memory cache.
 
 ## Tools exposed
 
