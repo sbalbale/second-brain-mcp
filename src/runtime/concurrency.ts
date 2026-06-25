@@ -8,7 +8,8 @@ export class AsyncLimiter {
     return new Promise<T>((resolve, reject) => {
       const start = () => {
         this.active++;
-        void task()
+        void Promise.resolve()
+          .then(task)
           .then(resolve, reject)
           .finally(() => {
             this.active--;

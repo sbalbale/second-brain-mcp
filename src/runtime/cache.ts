@@ -6,11 +6,11 @@ import { SingleFlight } from "./concurrency.js";
 type RedisLike = {
   isReady?: boolean;
   connect(): Promise<unknown>;
+  disconnect(): Promise<void>;
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<unknown>;
   setEx(key: string, seconds: number, value: string): Promise<unknown>;
   on(event: "error", listener: (err: Error) => void): unknown;
-  destroy?: () => void;
 };
 
 type MemoryEntry = {
@@ -40,6 +40,7 @@ class MemoryCache {
   set<T>(key: string, value: T, ttlSeconds: number): void {
     if (ttlSeconds <= 0) return;
 
+    this.entries.delete(key);
     this.entries.set(key, {
       expiresAt: Date.now() + ttlSeconds * 1000,
       value,
@@ -195,7 +196,7 @@ export class AppCache {
     } catch (err) {
       this.warnRedis(`Redis cache unavailable, using process memory only: ${describeError(err)}`);
       this.redisDisabledUntil = Date.now() + 30_000;
-      client.destroy?.();
+      await client.disconnect().catch(() => {});
       return null;
     } finally {
       this.connectPromise = null;

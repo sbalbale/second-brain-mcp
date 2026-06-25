@@ -74,6 +74,17 @@ describe("AsyncLimiter", () => {
     await expect(first).rejects.toThrow("boom");
     await expect(second).resolves.toBe("ok");
   });
+
+  test("releases slots after synchronous task throws", async () => {
+    const limiter = new AsyncLimiter(1);
+    const first = limiter.run((() => {
+      throw new Error("sync boom");
+    }) as () => Promise<string>);
+    const second = limiter.run(async () => "recovered");
+
+    await expect(first).rejects.toThrow("sync boom");
+    await expect(second).resolves.toBe("recovered");
+  });
 });
 
 describe("SingleFlight", () => {

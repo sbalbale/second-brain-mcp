@@ -14,7 +14,7 @@ const redisMock = vi.hoisted(() => {
       set: ReturnType<typeof vi.fn>;
       setEx: ReturnType<typeof vi.fn>;
       on: ReturnType<typeof vi.fn>;
-      destroy: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
     }>,
     client: undefined as undefined | {
       isReady: boolean;
@@ -23,7 +23,7 @@ const redisMock = vi.hoisted(() => {
       set: ReturnType<typeof vi.fn>;
       setEx: ReturnType<typeof vi.fn>;
       on: ReturnType<typeof vi.fn>;
-      destroy: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
     },
   };
 
@@ -46,7 +46,7 @@ const redisMock = vi.hoisted(() => {
         state.store.set(key, value);
       }),
       on: vi.fn(),
-      destroy: vi.fn(() => {
+      disconnect: vi.fn(async () => {
         client.isReady = false;
       }),
     };
@@ -138,7 +138,7 @@ describe("AppCache Redis integration", () => {
     await expect(cache.getOrSet("C:/vault", "scope", "key", async () => ++calls)).resolves.toBe(1);
 
     expect(calls).toBe(1);
-    expect(redisMock.state.client?.destroy).toHaveBeenCalled();
+    expect(redisMock.state.client?.disconnect).toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("Redis cache unavailable"));
     errorSpy.mockRestore();
   });
