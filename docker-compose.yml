@@ -25,6 +25,15 @@ services:
       CF_ACCESS_AUD: ${CF_ACCESS_AUD:-}
       VAULT_AUTOCOMMIT: ${VAULT_AUTOCOMMIT:-true}
       DEFAULT_RESPONSE_FORMAT: ${DEFAULT_RESPONSE_FORMAT:-markdown}
+      CACHE_ENABLED: ${CACHE_ENABLED:-true}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-30}
+      CACHE_MAX_ENTRIES: ${CACHE_MAX_ENTRIES:-1000}
+      MAX_READ_CONCURRENCY: ${MAX_READ_CONCURRENCY:-16}
+      MAX_WRITE_CONCURRENCY: ${MAX_WRITE_CONCURRENCY:-1}
+      GIT_CONCURRENCY: ${GIT_CONCURRENCY:-1}
+      RAG_QUERY_CONCURRENCY: ${RAG_QUERY_CONCURRENCY:-2}
+      QMD_UPDATE_DEBOUNCE_MS: ${QMD_UPDATE_DEBOUNCE_MS:-2000}
     volumes:
       - ${VAULT_PATH}:/vault
       - qmd-config:/home/app/.config/qmd   # collection + context definitions
@@ -33,6 +42,25 @@ services:
     # internal docker network.
     expose:
       - "8787"
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - mcpnet
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    expose:
+      - "6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     networks:
       - mcpnet
 
@@ -54,3 +82,4 @@ networks:
 volumes:
   qmd-config:   # qmd collection + context config (~trivial size)
   qmd-models:   # qmd GGUF model cache (~2GB, expensive to re-download)
+  redis-data:   # self-hosted Redis cache persistence
