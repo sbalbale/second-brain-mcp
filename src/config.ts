@@ -40,6 +40,7 @@ const ConfigSchema = z.object({
   GIT_CONCURRENCY: z.coerce.number().int().min(1).default(1),
   RAG_QUERY_CONCURRENCY: z.coerce.number().int().min(1).default(2),
   QMD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).default(2000),
+  QMD_QUERY_TIMEOUT_MS: z.coerce.number().int().min(1000).default(45000),
 }).refine(
   (data) => {
     const hasAnyOAuth = !!(data.OAUTH_ISSUER || data.OAUTH_AUDIENCE || data.OAUTH_AUTH_ENDPOINT || data.OAUTH_TOKEN_ENDPOINT);

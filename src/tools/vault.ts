@@ -692,7 +692,7 @@ Returns:
           cfg.VAULT_ROOT,
           "vault_rag_search",
           { query, limit },
-          () => runtime.runRag(() => qmdQuery(query, limit)),
+          () => runtime.runRag(() => qmdQuery(query, limit, undefined, cfg.QMD_QUERY_TIMEOUT_MS)),
         );
         return ok({
           count: results.length,

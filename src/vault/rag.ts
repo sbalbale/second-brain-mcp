@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { RAG_INDEX_STATUS_FILE } from "../constants.js";
 import { exists, readText, writeTextAtomic } from "./fs.js";
@@ -20,19 +20,24 @@ export interface QmdIndexStatus {
   message?: string;
 }
 
-export function qmdUpdate(): void {
-  execFileSync("qmd", ["update"], { stdio: "inherit" });
-}
-
-export function qmdEmbed(): void {
-  execFileSync("qmd", ["embed"], { stdio: "inherit" });
-}
-
-export function qmdQuery(query: string, limit: number = 5, minScore: number = 0.2): Promise<QmdResult[]> {
+export function qmdQuery(
+  query: string,
+  limit: number = 5,
+  minScore: number = 0.2,
+  timeoutMs: number = 45000,
+): Promise<QmdResult[]> {
   return new Promise((resolve, reject) => {
     const child = spawn("qmd", ["query", query, "--json", "-n", String(limit), "--min-score", String(minScore)]);
     let stdout = "";
     let stderr = "";
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error(`qmd query timed out after ${timeoutMs}ms and was killed`));
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
@@ -40,8 +45,17 @@ export function qmdQuery(query: string, limit: number = 5, minScore: number = 0.
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
-    child.on("error", reject);
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+
       if (code !== 0) {
         const suffix = signal ? ` (signal ${signal})` : "";
         reject(new Error(`qmd query exited with code ${code ?? 1}${suffix}: ${stderr.trim()}`));
