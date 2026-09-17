@@ -16,7 +16,7 @@ import { parseMarkdown, mergeFrontmatter, buildMarkdown } from "../vault/frontma
 import { searchText } from "../vault/search.js";
 import { scanWikiPages, buildLinkResolver, buildBacklinksByPath, rewriteWikilinks } from "../vault/links.js";
 import { maybeAutocommit as gitMaybeAutocommit, gitLog } from "../vault/git.js";
-import { qmdQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
+import { qmdQuery, qmdRemoteQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
 import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
@@ -692,7 +692,20 @@ Returns:
           cfg.VAULT_ROOT,
           "vault_rag_search",
           { query, limit },
-          () => runtime.runRag(() => qmdQuery(query, limit, undefined, cfg.QMD_QUERY_TIMEOUT_MS)),
+          () =>
+            runtime.runRag(() =>
+              cfg.QMD_REMOTE_URL
+                ? qmdRemoteQuery(
+                    cfg.QMD_REMOTE_URL,
+                    cfg.QMD_REMOTE_COLLECTION,
+                    query,
+                    limit,
+                    0.2,
+                    cfg.QMD_REMOTE_RERANK,
+                    cfg.QMD_QUERY_TIMEOUT_MS,
+                  )
+                : qmdQuery(query, limit, undefined, cfg.QMD_QUERY_TIMEOUT_MS),
+            ),
         );
         return ok({
           count: results.length,

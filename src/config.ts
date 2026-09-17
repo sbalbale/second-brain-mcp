@@ -41,6 +41,9 @@ const ConfigSchema = z.object({
   RAG_QUERY_CONCURRENCY: z.coerce.number().int().min(1).default(2),
   QMD_UPDATE_DEBOUNCE_MS: z.coerce.number().int().min(0).default(2000),
   QMD_QUERY_TIMEOUT_MS: z.coerce.number().int().min(1000).default(45000),
+  QMD_REMOTE_URL: optionalString,
+  QMD_REMOTE_COLLECTION: z.string().min(1).default("vault"),
+  QMD_REMOTE_RERANK: boolFromEnv.default("false"),
 }).refine(
   (data) => {
     const hasAnyOAuth = !!(data.OAUTH_ISSUER || data.OAUTH_AUDIENCE || data.OAUTH_AUTH_ENDPOINT || data.OAUTH_TOKEN_ENDPOINT);

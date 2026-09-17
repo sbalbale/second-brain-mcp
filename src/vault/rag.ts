@@ -71,6 +71,53 @@ export function qmdQuery(
   });
 }
 
+interface QmdRemoteResult {
+  file: string;
+  score: number;
+  snippet: string;
+  title: string;
+}
+
+export async function qmdRemoteQuery(
+  remoteUrl: string,
+  collection: string,
+  query: string,
+  limit: number,
+  minScore: number,
+  rerank: boolean,
+  timeoutMs: number,
+): Promise<QmdResult[]> {
+  const res = await fetch(`${remoteUrl.replace(/\/$/, "")}/query`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      searches: [
+        { type: "lex", query },
+        { type: "vec", query },
+      ],
+      intent: query,
+      collections: [collection],
+      limit,
+      minScore,
+      rerank,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+
+  if (!res.ok) {
+    throw new Error(`qmd remote query failed: HTTP ${res.status} ${await res.text()}`);
+  }
+
+  const body = (await res.json()) as { results: QmdRemoteResult[] };
+  const collectionPrefix = new RegExp(`^qmd://${collection}/`);
+  return body.results.map((r) => ({
+    displayPath: r.file.replace(collectionPrefix, ""),
+    score: r.score,
+    snippet: r.snippet,
+    title: r.title,
+  }));
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
