@@ -4,12 +4,16 @@ import type { Config } from "./config.js";
 import { registerVaultTools } from "./tools/vault.js";
 import { registerWikiTools } from "./tools/wiki.js";
 import { registerWikiPrompts } from "./prompts/wiki.js";
+import { SERVER_INSTRUCTIONS } from "./instructions.js";
 
 export function createServer(cfg: Config): McpServer {
-  const server = new McpServer({
-    name: SERVER_NAME,
-    version: SERVER_VERSION,
-  });
+  const server = new McpServer(
+    {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+    },
+    { instructions: SERVER_INSTRUCTIONS },
+  );
 
   // Register tools
   registerVaultTools(server, cfg);

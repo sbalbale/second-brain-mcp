@@ -128,6 +128,12 @@ Set `REDIS_URL=redis://redis:6379` when using the included Compose stack. If Red
 | `wiki_query` | Answer a question against the wiki with `[[citations]]` |
 | `wiki_lint` | Full health-check workflow and reporting |
 
+`wiki_ingest`, `wiki_query` and `wiki_lint` start by reading the vault's `AGENTS.md`, which is the rulebook for every client.
+
+## Server instructions
+
+On connect, every client receives a short rule summary (`src/instructions.ts`, sent as the MCP `instructions` field): read `AGENTS.md` first, read pages in full by following `next_offset`, never edit `raw/`, keep pages under ~20 KB, the user's direct statements outrank the vault, no secrets, then rebuild the index, log and sync. That way Hermes, Claude.ai, ChatGPT and Claude Code all follow the same rules without any per-client setup.
+
 ## Security model
 
 - **Path safety**: every tool rejects paths that escape `VAULT_ROOT` via `..`, symlinks, or absolute paths.
