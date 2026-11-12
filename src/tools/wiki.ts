@@ -59,6 +59,15 @@ function fail(err: unknown) {
   };
 }
 
+/** Every file under raw/ (vault-relative paths), so [[raw/...]] links can be checked for existence. */
+async function listRawPaths(root: string): Promise<Set<string>> {
+  try {
+    return new Set((await listDir(root, RAW_DIR, { depth: 10, includeDirs: false })).map((e) => e.path));
+  } catch {
+    return new Set();
+  }
+}
+
 function maybeAutocommit(cfg: Config, message: string) {
   return getRuntime(cfg).runGit(() => gitMaybeAutocommit(cfg.VAULT_AUTOCOMMIT, cfg.VAULT_ROOT, message));
 }
@@ -254,7 +263,8 @@ Returns:
           const index = await scanWikiPages(cfg.VAULT_ROOT);
           const resolver = buildLinkResolver(index.pages);
           const backlinks = buildBacklinksByPath(index.pages, resolver);
-          const issues = scanLint(index.pages, resolver, backlinks, required_fields, max_page_bytes);
+          const rawPaths = await listRawPaths(cfg.VAULT_ROOT);
+          const issues = scanLint(index.pages, resolver, backlinks, required_fields, max_page_bytes, (p) => rawPaths.has(p));
           const byType: Record<string, number> = {};
           for (const i of issues) byType[i.type] = (byType[i.type] ?? 0) + 1;
           return { issueCount: issues.length, byType, issues };
@@ -568,7 +578,8 @@ Returns:
         const index = await scanWikiPages(root);
         const resolver = buildLinkResolver(index.pages);
         const backlinks = buildBacklinksByPath(index.pages, resolver);
-        const issues = scanLint(index.pages, resolver, backlinks, required_fields);
+        const rawPaths = await listRawPaths(root);
+        const issues = scanLint(index.pages, resolver, backlinks, required_fields, OVERSIZED_PAGE_BYTES, (p) => rawPaths.has(p));
 
         const changes: { file: string; class: string; before?: unknown; after?: unknown }[] = [];
         const counts = { frontmatter: 0, links: 0, index: 0 };

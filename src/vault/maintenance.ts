@@ -46,6 +46,8 @@ export function scanLint(
   backlinksByPath: Map<string, string[]>,
   requiredFields: string[],
   maxPageBytes: number = OVERSIZED_PAGE_BYTES,
+  /** Optional existence check for vault-path links like [[raw/chats/x.md]] (AGENTS.md Rule 4). */
+  pathExists?: (vaultPath: string) => boolean,
 ): LintIssue[] {
   const issues: LintIssue[] = [];
   for (const p of pages) {
@@ -70,6 +72,13 @@ export function scanLint(
     // Outgoing link health.
     for (const target of p.outlinks) {
       if (/^https?:\/\//i.test(target)) continue;
+      // Raw sources are linked by full vault path; they're valid when the file exists.
+      if (pathExists && /^raw\//i.test(target.trim())) {
+        const t = target.trim();
+        if (pathExists(t) || pathExists(`${t}.md`)) continue;
+        issues.push({ type: "broken-link", page: p.relPath, target });
+        continue;
+      }
       const { page, ambiguous, candidates } = resolver.resolve(target);
       if (ambiguous) {
         issues.push({ type: "ambiguous-link", page: p.relPath, target, candidates: candidates.map((c) => c.relPath) });

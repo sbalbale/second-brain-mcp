@@ -214,3 +214,20 @@ describe('scanLint oversized pages', () => {
     expect(scanLint(pages, resolver, buildBacklinksByPath(pages, resolver), [], 1).some((i) => i.type === 'oversized')).toBe(false);
   });
 });
+
+describe('scanLint raw-path links', () => {
+  const pages = [page('wiki/sources/s.md', 'S', 's', ['raw/chats/real.md', 'raw/chats/missing.md', 'raw/inbox/noext'], { type: 'source', title: 'S' })];
+  const resolver = buildLinkResolver(pages);
+  const bl = buildBacklinksByPath(pages, resolver);
+  const exists = (p: string) => p === 'raw/chats/real.md' || p === 'raw/inbox/noext.md';
+
+  test('existing raw files resolve (with or without .md); missing ones are broken', () => {
+    const broken = scanLint(pages, resolver, bl, [], 0, exists).filter((i) => i.type === 'broken-link').map((i) => (i as { target: string }).target);
+    expect(broken).toEqual(['raw/chats/missing.md']);
+  });
+
+  test('without an existence check, raw links behave as before (unresolved)', () => {
+    const broken = scanLint(pages, resolver, bl, [], 0).filter((i) => i.type === 'broken-link');
+    expect(broken.length).toBe(3);
+  });
+});
