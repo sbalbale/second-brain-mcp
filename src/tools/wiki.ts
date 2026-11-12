@@ -12,6 +12,7 @@ import {
   WIKI_SUBDIRS,
   INDEX_FILE,
   LOG_FILE,
+  OVERSIZED_PAGE_BYTES,
 } from "../constants.js";
 import { listDir, writeTextAtomic, exists, readText, softDelete } from "../vault/fs.js";
 import { searchText } from "../vault/search.js";
@@ -149,7 +150,8 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
         );
 
         await writeTextAtomic(root, INDEX_FILE, indexContent);
-        return ok({ status: "success", pageCount: pages.length });
+        const commit = await maybeAutocommit(cfg, `wiki_index_rebuild: ${pages.length} page(s)`);
+        return ok({ status: "success", pageCount: pages.length, ...commit });
       } catch (err) {
         return fail(err);
       }
@@ -167,6 +169,7 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
       },
     },
     async ({ entry }) => runtime.runWrite(async () => {
+      if (cfg.READ_ONLY) return fail(new Error("Server is running in read-only mode."));
       try {
         const root = cfg.VAULT_ROOT;
         let content = "";
@@ -185,7 +188,8 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
         const nextContent = buildMarkdown(parsed.frontmatter, nextBody);
 
         await writeTextAtomic(root, LOG_FILE, nextContent);
-        return ok({ status: "success", date });
+        const commit = await maybeAutocommit(cfg, `wiki_log_append: ${date}`);
+        return ok({ status: "success", date, ...commit });
       } catch (err) {
         return fail(err);
       }
@@ -231,24 +235,26 @@ export function registerWikiTools(server: McpServer, cfg: Config): void {
     "wiki_lint_scan",
     {
       title: "Scan wiki for health issues",
-      description: `Identifies orphan pages, broken links, ambiguous links (a bare target matching more than one note), and pages missing required frontmatter. Read-only — see wiki_lint_fix to apply the mechanical subset.
+      description: `Identifies orphan pages, broken links, ambiguous links (a bare target matching more than one note), pages missing required frontmatter, and oversized pages (bigger than max_page_bytes — split them into topic sub-pages and move dated detail to sources/). Read-only — see wiki_lint_fix to apply the mechanical subset.
 
 Args:
   - required_fields (string[]): frontmatter keys every page must have. Default ["type","title"].
+  - max_page_bytes (number): flag pages larger than this. Default ${OVERSIZED_PAGE_BYTES}; 0 disables.
 
 Returns:
   { "issueCount", "byType": { ... }, "issues": [structured LintIssue, ...] }`,
       inputSchema: {
         required_fields: z.array(z.string()).default(["type", "title"]),
+        max_page_bytes: z.number().int().min(0).default(OVERSIZED_PAGE_BYTES),
       },
     },
-    async ({ required_fields }) => {
+    async ({ required_fields, max_page_bytes }) => {
       try {
-        const out = await cached("wiki_lint_scan", { required_fields }, async () => {
+        const out = await cached("wiki_lint_scan", { required_fields, max_page_bytes }, async () => {
           const index = await scanWikiPages(cfg.VAULT_ROOT);
           const resolver = buildLinkResolver(index.pages);
           const backlinks = buildBacklinksByPath(index.pages, resolver);
-          const issues = scanLint(index.pages, resolver, backlinks, required_fields);
+          const issues = scanLint(index.pages, resolver, backlinks, required_fields, max_page_bytes);
           const byType: Record<string, number> = {};
           for (const i of issues) byType[i.type] = (byType[i.type] ?? 0) + 1;
           return { issueCount: issues.length, byType, issues };

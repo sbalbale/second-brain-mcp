@@ -82,8 +82,8 @@ Set `REDIS_URL=redis://redis:6379` when using the included Compose stack. If Red
 
 | Tool | Purpose |
 |---|---|
-| `vault_read` | Read a file; return body + parsed frontmatter |
-| `vault_batch_read` | Read many files, one round-trip |
+| `vault_read` | Read a file; return body + parsed frontmatter. Large bodies come back in chunks (`offset` / `max_chars`, follow `next_offset`) so nothing is silently cut off |
+| `vault_batch_read` | Read many files, one round-trip (each body capped; `truncated` + `next_offset` point to `vault_read` for the rest) |
 | `vault_write` | Atomic write with optional frontmatter merge, optional auto-commit |
 | `vault_list` | Directory listing with depth + glob filter |
 | `vault_search` | Full-text search (ripgrep with Node fallback) |
@@ -100,10 +100,10 @@ Set `REDIS_URL=redis://redis:6379` when using the included Compose stack. If Red
 | `vault_rag_status` | Read the current qmd indexing job status |
 | `vault_rag_search` | Hybrid semantic search (BM25 + vector + reranking) via local qmd |
 | `wiki_scaffold` | Create the LLM-Wiki directory structure + starter files |
-| `wiki_index_rebuild` | Rebuild `wiki/index.md` from filesystem state |
-| `wiki_log_append` | Append a dated entry to `wiki/log.md` |
+| `wiki_index_rebuild` | Rebuild `wiki/index.md` from filesystem state (auto-commits) |
+| `wiki_log_append` | Append a dated entry to `wiki/log.md` (auto-commits) |
 | `wiki_link_graph` | Return backlinks + outlinks for a page (neighborhood) |
-| `wiki_lint_scan` | Read-only health scan: broken links, ambiguous links, orphans, missing frontmatter |
+| `wiki_lint_scan` | Read-only health scan: broken links, ambiguous links, orphans, missing frontmatter, oversized pages (> `max_page_bytes`, default 20 KB; log exempt) |
 | `wiki_lint_fix` | Auto-fix the mechanical subset of the lint scan (frontmatter / index / links); `dry_run` by default |
 | `wiki_validate_frontmatter` | Check a directory for files missing required frontmatter fields |
 | `wiki_tags` | Enumerate all tags (frontmatter + inline `#tags`) with counts and pages |

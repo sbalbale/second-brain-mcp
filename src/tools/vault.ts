@@ -18,11 +18,17 @@ import { scanWikiPages, buildLinkResolver, buildBacklinksByPath, rewriteWikilink
 import { maybeAutocommit as gitMaybeAutocommit, gitLog } from "../vault/git.js";
 import { qmdQuery, qmdRemoteQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
-import { CHARACTER_LIMIT, WIKI_DIR } from "../constants.js";
+import { BATCH_READ_PER_FILE_MAX, CHARACTER_LIMIT, READ_CHUNK_DEFAULT, READ_CHUNK_MAX, WIKI_DIR } from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
+import { sliceBody } from "../vault/chunk.js";
 import { getRuntime } from "../runtime/index.js";
 
-/** Shared helper: format a tool response with both text and structured content. */
+/**
+ * Shared helper: format a tool response with both text and structured content.
+ * Last-resort cap only — tools that can return large payloads (vault_read,
+ * vault_batch_read) chunk their own output so this never cuts a JSON document
+ * in half. structuredContent is always complete.
+ */
 function ok(structured: unknown, text?: string) {
   const textContent = text ?? JSON.stringify(structured, null, 2);
   const capped =
@@ -67,39 +73,61 @@ export function registerVaultTools(server: McpServer, cfg: Config): void {
     {
       title: "Read a vault file",
       description: `Read a single file from the vault and return its body, parsed YAML frontmatter, and basic metadata.
+Large bodies are returned in chunks: if "next_offset" is not null, call again with offset=next_offset to read the rest.
 
 Args:
   - path (string): Vault-relative path (e.g. "wiki/concepts/llm-wiki.md").
   - response_format ('markdown' | 'json'): default 'markdown'.
+  - offset (number): character offset into the body to start from. Default 0.
+  - max_chars (number): maximum body characters to return (default ${READ_CHUNK_DEFAULT}, max ${READ_CHUNK_MAX}).
 
 Returns:
   {
     "path": string,
     "bytes": number,
     "frontmatter": object,
-    "body": string,
-    "hasFrontmatter": boolean
+    "body": string,            // this chunk of the body
+    "hasFrontmatter": boolean,
+    "offset": number,
+    "total_chars": number,     // full body length
+    "next_offset": number | null,
+    "truncated": boolean       // true when more body remains
   }`,
-      inputSchema: { path: VaultPath, response_format: ResponseFormatSchema },
+      inputSchema: {
+        path: VaultPath,
+        response_format: ResponseFormatSchema,
+        offset: z.number().int().min(0).default(0),
+        max_chars: z.number().int().min(1000).max(READ_CHUNK_MAX).default(READ_CHUNK_DEFAULT),
+      },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ path: rel, response_format }) => {
+    async ({ path: rel, response_format, offset, max_chars }) => {
       try {
         const text = await cached("vault_read", { rel }, () => readText(cfg.VAULT_ROOT, rel));
         const parsed = parseMarkdown(text);
+        const chunk = sliceBody(parsed.body, offset ?? 0, max_chars ?? READ_CHUNK_DEFAULT);
         const out = {
           path: rel,
           bytes: Buffer.byteLength(text, "utf8"),
           frontmatter: parsed.frontmatter,
-          body: parsed.body,
+          body: chunk.body,
           hasFrontmatter: parsed.hasFrontmatter,
+          offset: chunk.offset,
+          total_chars: chunk.total,
+          next_offset: chunk.next,
+          truncated: chunk.next !== null,
         };
         if (response_format === ResponseFormat.MARKDOWN) {
           const fmPretty =
-            out.hasFrontmatter && Object.keys(out.frontmatter).length > 0
+            chunk.offset === 0 && out.hasFrontmatter && Object.keys(out.frontmatter).length > 0
               ? "```yaml\n" + JSON.stringify(out.frontmatter, null, 2) + "\n```\n\n"
               : "";
-          return ok(out, `# ${rel}\n\n${fmPretty}${out.body}`);
+          const head = chunk.offset > 0 ? `# ${rel} (continued from offset ${chunk.offset})\n\n` : `# ${rel}\n\n`;
+          const tail =
+            chunk.next !== null
+              ? `\n\n[body continues: ${chunk.total - chunk.next} more chars of ${chunk.total} — call vault_read with offset=${chunk.next}]`
+              : "";
+          return ok(out, `${head}${fmPretty}${chunk.body}${tail}`);
         }
         return ok(out);
       } catch (err) {
@@ -114,24 +142,36 @@ Returns:
     {
       title: "Read multiple vault files",
       description: `Read many files in one round-trip. Failing reads are reported per-path instead of aborting the whole call.
+Each body is capped (about ${BATCH_READ_PER_FILE_MAX} chars, less for big batches) so the whole response stays readable; when "truncated" is true use vault_read with offset=next_offset for the rest.
 
 Args:
   - paths (string[]): Up to 50 vault-relative paths.
 
 Returns:
-  { "results": [{ "path", "ok", "body"?, "frontmatter"?, "error"? }, ...] }`,
+  { "results": [{ "path", "ok", "body"?, "frontmatter"?, "total_chars"?, "next_offset"?, "truncated"?, "error"? }, ...] }`,
       inputSchema: {
         paths: z.array(VaultPath).min(1).max(50),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
     async ({ paths }) => {
+      // Split the budget across files so the serialized batch stays under CHARACTER_LIMIT.
+      const perFile = Math.max(500, Math.min(BATCH_READ_PER_FILE_MAX, Math.floor((CHARACTER_LIMIT * 0.8) / paths.length)));
       const results = await Promise.all(
         paths.map(async (p) => {
           try {
             const text = await cached("vault_read", { rel: p }, () => readText(cfg.VAULT_ROOT, p));
             const parsed = parseMarkdown(text);
-            return { path: p, ok: true, frontmatter: parsed.frontmatter, body: parsed.body };
+            const chunk = sliceBody(parsed.body, 0, perFile);
+            return {
+              path: p,
+              ok: true,
+              frontmatter: parsed.frontmatter,
+              body: chunk.body,
+              total_chars: chunk.total,
+              next_offset: chunk.next,
+              truncated: chunk.next !== null,
+            };
           } catch (err) {
             return { path: p, ok: false, error: err instanceof Error ? err.message : String(err) };
           }

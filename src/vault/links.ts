@@ -14,6 +14,7 @@ export interface PageInfo {
   category: "sources" | "entities" | "concepts" | "synthesis" | "other";
   outlinks: string[]; // wikilink targets as written
   frontmatter: Record<string, unknown>; // parsed YAML frontmatter
+  bytes?: number; // UTF-8 size of the whole file (frontmatter + body)
 }
 
 export interface WikiIndex {
@@ -86,6 +87,7 @@ async function collect(
       category,
       outlinks,
       frontmatter: parsed.frontmatter,
+      bytes: Buffer.byteLength(text, "utf8"),
     });
   }
 }

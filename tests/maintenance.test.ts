@@ -187,3 +187,30 @@ describe('scanLint', () => {
     expect(issues.find((i) => i.type === 'broken-link')).toBeUndefined();
   });
 });
+
+describe('scanLint oversized pages', () => {
+  const sized = (relPath: string, bytes: number): PageInfo => ({ ...page(relPath, relPath, relPath, [], { type: 'x', title: 't' }), bytes });
+
+  test('flags pages over the limit and leaves smaller ones alone', () => {
+    const pages = [sized('wiki/entities/big.md', 30_000), sized('wiki/entities/small.md', 5_000)];
+    const resolver = buildLinkResolver(pages);
+    const issues = scanLint(pages, resolver, buildBacklinksByPath(pages, resolver), ['type', 'title'], 20_000);
+    expect(issues).toContainEqual({ type: 'oversized', page: 'wiki/entities/big.md', bytes: 30_000, limit: 20_000 });
+    expect(issues.find((i) => i.type === 'oversized' && i.page === 'wiki/entities/small.md')).toBeUndefined();
+  });
+
+  test('exempts the log and its archives, and 0 disables the check', () => {
+    const pages = [sized('wiki/log.md', 90_000), sized('wiki/log-archive-2026-06-to-09.md', 90_000), sized('wiki/entities/big.md', 90_000)];
+    const resolver = buildLinkResolver(pages);
+    const bl = buildBacklinksByPath(pages, resolver);
+    const flagged = scanLint(pages, resolver, bl, [], 20_000).filter((i) => i.type === 'oversized').map((i) => i.page);
+    expect(flagged).toEqual(['wiki/entities/big.md']);
+    expect(scanLint(pages, resolver, bl, [], 0).some((i) => i.type === 'oversized')).toBe(false);
+  });
+
+  test('pages without a known size are never flagged', () => {
+    const pages = [page('wiki/entities/x.md', 'X', 'x', [], { type: 'x', title: 'X' })];
+    const resolver = buildLinkResolver(pages);
+    expect(scanLint(pages, resolver, buildBacklinksByPath(pages, resolver), [], 1).some((i) => i.type === 'oversized')).toBe(false);
+  });
+});

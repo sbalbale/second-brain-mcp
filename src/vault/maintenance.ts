@@ -1,6 +1,12 @@
 import type { PageInfo, LinkResolver } from "./links.js";
 import { slugify } from "./paths.js";
 import { parseMarkdown, buildMarkdown } from "./frontmatter.js";
+import { LOG_FILE, OVERSIZED_PAGE_BYTES } from "../constants.js";
+
+/** The active log and its rotated archives are append-only and exempt from the size check. */
+function isLogPage(relPath: string): boolean {
+  return relPath === LOG_FILE || /^wiki\/log-archive[^/]*\.md$/i.test(relPath);
+}
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -15,7 +21,8 @@ export type LintIssue =
   | { type: "orphan"; page: string }
   | { type: "broken-link"; page: string; target: string }
   | { type: "ambiguous-link"; page: string; target: string; candidates: string[] }
-  | { type: "missing-frontmatter"; page: string; missing: string[] };
+  | { type: "missing-frontmatter"; page: string; missing: string[] }
+  | { type: "oversized"; page: string; bytes: number; limit: number };
 
 /** Map a wiki subdirectory category to a singular frontmatter `type` value. */
 export function categoryToType(category: PageInfo["category"]): string {
@@ -38,9 +45,16 @@ export function scanLint(
   resolver: LinkResolver,
   backlinksByPath: Map<string, string[]>,
   requiredFields: string[],
+  maxPageBytes: number = OVERSIZED_PAGE_BYTES,
 ): LintIssue[] {
   const issues: LintIssue[] = [];
   for (const p of pages) {
+    // Oversized: entity/concept pages should stay a current summary; split before
+    // they outgrow a single vault_read chunk. The append-only log is exempt.
+    if (maxPageBytes > 0 && p.bytes !== undefined && p.bytes > maxPageBytes && !isLogPage(p.relPath)) {
+      issues.push({ type: "oversized", page: p.relPath, bytes: p.bytes, limit: maxPageBytes });
+    }
+
     // Orphans: no resolved inbound links.
     const bls = backlinksByPath.get(p.relPath) ?? [];
     if (bls.length === 0) {
