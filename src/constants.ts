@@ -4,6 +4,10 @@ export const CHARACTER_LIMIT = 25_000;
 export const READ_CHUNK_DEFAULT = 20_000;
 export const READ_CHUNK_MAX = 22_000;
 
+/** vault_list page size (entries); pages also stop early to stay under CHARACTER_LIMIT. */
+export const LIST_PAGE_DEFAULT = 100;
+export const LIST_PAGE_MAX = 500;
+
 /** Per-file body cap inside vault_batch_read so a batch stays under CHARACTER_LIMIT. */
 export const BATCH_READ_PER_FILE_MAX = 6_000;
 

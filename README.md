@@ -85,7 +85,7 @@ Set `REDIS_URL=redis://redis:6379` when using the included Compose stack. If Red
 | `vault_read` | Read a file; return body + parsed frontmatter. Large bodies come back in chunks (`offset` / `max_chars`, follow `next_offset`) so nothing is silently cut off |
 | `vault_batch_read` | Read many files, one round-trip (each body capped; `truncated` + `next_offset` point to `vault_read` for the rest) |
 | `vault_write` | Atomic write with optional frontmatter merge, optional auto-commit |
-| `vault_list` | Directory listing with depth + glob filter |
+| `vault_list` | Directory listing with depth + glob filter; sorted and paginated (`offset` / `limit`, follow `next_offset`) |
 | `vault_search` | Full-text search (ripgrep with Node fallback) |
 | `vault_search_frontmatter` | Query in-memory frontmatter index by field |
 | `vault_move` | Rename / relocate within the vault; rewrites inbound `[[wikilinks]]` (opt out with `relink:false`) |

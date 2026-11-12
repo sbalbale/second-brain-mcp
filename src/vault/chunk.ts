@@ -17,3 +17,29 @@ export function sliceBody(
   }
   return { body: body.slice(start, end), offset: start, next: end < total ? end : null, total };
 }
+
+/**
+ * Page through a list: start at `offset`, take at most `limit` items, and stop
+ * early once the pretty-printed JSON of the page would exceed `charBudget`
+ * (always returns at least one item when any remain). next=null at the end.
+ */
+export function paginate<T>(
+  items: T[],
+  offset: number,
+  limit: number,
+  charBudget: number,
+): { items: T[]; offset: number; next: number | null; total: number } {
+  const total = items.length;
+  const start = Math.min(Math.max(0, offset), total);
+  const page: T[] = [];
+  let used = 0;
+  for (const item of items.slice(start)) {
+    if (page.length >= limit) break;
+    const cost = JSON.stringify(item, null, 2).length + 8; // + indentation/comma overhead
+    if (page.length > 0 && used + cost > charBudget) break;
+    page.push(item);
+    used += cost;
+  }
+  const end = start + page.length;
+  return { items: page, offset: start, next: end < total ? end : null, total };
+}

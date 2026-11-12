@@ -1,5 +1,5 @@
 import { expect, test, describe } from 'vitest';
-import { sliceBody } from '../src/vault/chunk.js';
+import { paginate, sliceBody } from '../src/vault/chunk.js';
 
 describe('sliceBody', () => {
   test('returns the whole body with next=null when it fits', () => {
@@ -42,5 +42,40 @@ describe('sliceBody', () => {
   test('clamps out-of-range offsets', () => {
     const r = sliceBody('abc', 99, 10);
     expect(r).toEqual({ body: '', offset: 3, next: null, total: 3 });
+  });
+});
+
+describe('paginate', () => {
+  const items = Array.from({ length: 250 }, (_, i) => ({ path: `wiki/p${String(i).padStart(3, '0')}.md`, type: 'file' }));
+
+  test('walks every item exactly once across pages', () => {
+    let offset: number | null = 0;
+    const seen: unknown[] = [];
+    while (offset !== null) {
+      const p = paginate(items, offset, 100, 1_000_000);
+      expect(p.items.length).toBeLessThanOrEqual(100);
+      expect(p.total).toBe(250);
+      seen.push(...p.items);
+      offset = p.next;
+    }
+    expect(seen).toEqual(items);
+  });
+
+  test('stops early when the character budget is hit', () => {
+    const p = paginate(items, 0, 500, 2_000);
+    expect(p.items.length).toBeGreaterThan(0);
+    expect(p.items.length).toBeLessThan(500);
+    expect(JSON.stringify(p.items, null, 2).length).toBeLessThanOrEqual(2_000 + 200);
+    expect(p.next).toBe(p.items.length);
+  });
+
+  test('always returns at least one item even if it alone exceeds the budget', () => {
+    const p = paginate([{ path: 'x'.repeat(5000) }], 0, 10, 100);
+    expect(p.items.length).toBe(1);
+    expect(p.next).toBeNull();
+  });
+
+  test('offset past the end gives an empty final page', () => {
+    expect(paginate(items, 999, 10, 10_000)).toEqual({ items: [], offset: 250, next: null, total: 250 });
   });
 });

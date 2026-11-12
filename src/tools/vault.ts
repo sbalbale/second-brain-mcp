@@ -18,9 +18,17 @@ import { scanWikiPages, buildLinkResolver, buildBacklinksByPath, rewriteWikilink
 import { maybeAutocommit as gitMaybeAutocommit, gitLog } from "../vault/git.js";
 import { qmdQuery, qmdRemoteQuery, readQmdIndexStatus, startQmdIndexing, startQmdUpdate } from "../vault/rag.js";
 import { ResponseFormat, ResponseFormatSchema, VaultPath } from "../schemas/common.js";
-import { BATCH_READ_PER_FILE_MAX, CHARACTER_LIMIT, READ_CHUNK_DEFAULT, READ_CHUNK_MAX, WIKI_DIR } from "../constants.js";
+import {
+  BATCH_READ_PER_FILE_MAX,
+  CHARACTER_LIMIT,
+  LIST_PAGE_DEFAULT,
+  LIST_PAGE_MAX,
+  READ_CHUNK_DEFAULT,
+  READ_CHUNK_MAX,
+  WIKI_DIR,
+} from "../constants.js";
 import { PathSafetyError } from "../vault/paths.js";
-import { sliceBody } from "../vault/chunk.js";
+import { paginate, sliceBody } from "../vault/chunk.js";
 import { getRuntime } from "../runtime/index.js";
 
 /**
@@ -243,29 +251,44 @@ Returns:
     {
       title: "List vault directory",
       description: `Directory listing with optional recursion and glob filter. Skips .git/ and .trash/ by default.
+Results are sorted by path and paginated: if "next_offset" is not null, call again with offset=next_offset for the next page.
 
 Args:
   - path (string): Vault-relative directory path. Use "." for vault root.
   - depth (integer 0-10): recurse this many levels. 0 = just the named dir.
   - glob (string, optional): glob filter against vault-relative posix path (e.g. "wiki/**/*.md").
   - include_dirs (boolean): default true.
+  - offset (integer): index of the first entry to return. Default 0.
+  - limit (integer 1-${LIST_PAGE_MAX}): maximum entries per page. Default ${LIST_PAGE_DEFAULT}. Pages also stop early to stay under the response size cap.
 
 Returns:
-  { "count": number, "entries": [{ "path", "type", "size"?, "modified"? }, ...] }`,
+  { "count": number /* entries in this page */, "total": number, "offset": number, "next_offset": number | null,
+    "truncated": boolean, "entries": [{ "path", "type", "size"?, "modified"? }, ...] }`,
       inputSchema: {
         path: z.string().default("."),
         depth: z.number().int().min(0).max(10).default(0),
         glob: z.string().optional(),
         include_dirs: z.boolean().default(true),
+        offset: z.number().int().min(0).default(0),
+        limit: z.number().int().min(1).max(LIST_PAGE_MAX).default(LIST_PAGE_DEFAULT),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
     },
-    async ({ path: rel, depth, glob, include_dirs }) => {
+    async ({ path: rel, depth, glob, include_dirs, offset, limit }) => {
       try {
-        const entries = await cached("vault_list", { rel, depth, glob, include_dirs }, () =>
-          listDir(cfg.VAULT_ROOT, rel, { depth, globFilter: glob, includeDirs: include_dirs }),
+        const entries = await cached("vault_list", { rel, depth, glob, include_dirs }, async () =>
+          (await listDir(cfg.VAULT_ROOT, rel, { depth, globFilter: glob, includeDirs: include_dirs }))
+            .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)),
         );
-        return ok({ count: entries.length, entries });
+        const page = paginate(entries, offset ?? 0, limit ?? LIST_PAGE_DEFAULT, Math.floor(CHARACTER_LIMIT * 0.8));
+        return ok({
+          count: page.items.length,
+          total: page.total,
+          offset: page.offset,
+          next_offset: page.next,
+          truncated: page.next !== null,
+          entries: page.items,
+        });
       } catch (err) {
         return fail(err);
       }
